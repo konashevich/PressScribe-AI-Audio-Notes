@@ -19,10 +19,34 @@ from PySide6.QtGui import QAction, QFont, QActionGroup, QIcon, QColor, QTextChar
 # --- Core Logic Imports ---
 import speech_recognition as sr
 import pyperclip
-import google.generativeai as genai
-import requests
-import numpy as np
-from faster_whisper import WhisperModel
+
+_genai = None
+_numpy = None
+_whisper_model_cls = None
+
+
+def get_genai():
+    global _genai
+    if _genai is None:
+        import google.generativeai as genai_module
+        _genai = genai_module
+    return _genai
+
+
+def get_numpy():
+    global _numpy
+    if _numpy is None:
+        import numpy as numpy_module
+        _numpy = numpy_module
+    return _numpy
+
+
+def get_whisper_model_cls():
+    global _whisper_model_cls
+    if _whisper_model_cls is None:
+        from faster_whisper import WhisperModel
+        _whisper_model_cls = WhisperModel
+    return _whisper_model_cls
 
 
 def default_qwen_asr_url():
@@ -355,6 +379,7 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
         self.apply_settings() # This will also call _refresh_all_ghost_cursors
+        self._preload_heavy_deps_async()
 
     def init_ui(self):
         self.create_menu()
@@ -991,10 +1016,26 @@ class MainWindow(QMainWindow):
             raise RuntimeError("Google returned an empty transcription.")
         return text
 
+    def _preload_heavy_deps_async(self):
+        """Load slow optional deps in the background after the UI is shown."""
+        def preload():
+            service = self.settings.get("transcription_service", DEFAULT_SETTINGS["transcription_service"])
+            ai_service = self.settings.get("ai_service", DEFAULT_SETTINGS["ai_service"])
+            if service == "Gemini" or ai_service == "Gemini":
+                get_genai()
+            if service == "Local":
+                get_numpy()
+                get_whisper_model_cls()
+            if service == "Qwen 3 ASR Server" or ai_service == "Local":
+                import requests  # noqa: F401
+        threading.Thread(target=preload, daemon=True).start()
+
     def _transcribe_locally(self, audio_data_to_recognize):
+        np = get_numpy()
         if not self.whisper_model:
             model_name = self.settings.get("whisper_model", "base")
             print(f"DEBUG: Loading Whisper model: {model_name}")
+            WhisperModel = get_whisper_model_cls()
             self.whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
 
         raw_data = audio_data_to_recognize.get_raw_data()
@@ -1024,6 +1065,8 @@ class MainWindow(QMainWindow):
         if not qwen_asr_url:
             raise RuntimeError("Qwen 3 ASR server URL is not configured.")
 
+        import requests
+
         wav_data = audio_data_to_recognize.get_wav_data(convert_rate=16000, convert_width=2)
         response = requests.post(
             qwen_asr_url,
@@ -1043,6 +1086,7 @@ class MainWindow(QMainWindow):
         if not api_key:
             raise RuntimeError("Gemini API key is not configured.")
 
+        genai = get_genai()
         genai.configure(api_key=api_key)
         gemini_model_name = self.settings["gemini_model"]
         model = genai.GenerativeModel(gemini_model_name)
@@ -1172,12 +1216,14 @@ class MainWindow(QMainWindow):
             polished_text = ""
 
             if service == "Gemini":
+                genai = get_genai()
                 genai.configure(api_key=self.settings['api_key'])
                 gemini_model_name = self.settings["gemini_model"]
                 model = genai.GenerativeModel(gemini_model_name)
                 response = model.generate_content(prompt)
                 polished_text = response.text
             else: # Local AI
+                import requests
                 headers = {"Content-Type": "application/json"}
                 data = {
                     "model": "local-model",
