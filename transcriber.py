@@ -127,10 +127,12 @@ class Communicate(QObject):
 
 def safe_debug(message):
     """Print debug text without crashing on Windows console encodings."""
+    text = str(message)
     try:
-        print(message)
+        print(text)
     except UnicodeEncodeError:
-        print(str(message).encode("ascii", "replace").decode("ascii"))
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
 
 def safe_error_text(exc):
@@ -138,6 +140,17 @@ def safe_error_text(exc):
         return str(exc)
     except Exception:
         return repr(exc)
+
+
+def configure_stdio_encoding():
+    """Avoid Windows charmap crashes when logging non-ASCII transcripts."""
+    if not sys.platform.startswith("win"):
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 def resource_path(relative_path):
@@ -1421,11 +1434,11 @@ class MainWindow(QMainWindow):
         return self._transcribe_with_google(audio_data_to_recognize)
 
     def _process_audio_single_service(self, audio_data_to_recognize, service_name):
-        print(f"DEBUG: Starting {service_name} transcription of entire audio.")
+        safe_debug(f"DEBUG: Starting {service_name} transcription of entire audio.")
         try:
             text = self._transcribe_with_service(audio_data_to_recognize, service_name)
-            safe_debug(f"DEBUG: {service_name} transcription successful: '{text}'")
             self.comm.text_ready.emit(text + " ")
+            safe_debug(f"DEBUG: {service_name} transcription successful: '{text}'")
         except Exception as e:
             safe_debug(f"DEBUG: {service_name} transcription error: {safe_error_text(e)}")
             self.comm.error.emit(f"{service_name} transcription error: {safe_error_text(e)}")
@@ -1442,8 +1455,8 @@ class MainWindow(QMainWindow):
                 try:
                     safe_debug(f"DEBUG: Transcription attempt {attempt_number} using {service_name}")
                     text = self._transcribe_with_service(audio_data_to_recognize, service_name)
-                    safe_debug(f"DEBUG: {service_name} transcription successful: '{text}'")
                     self.comm.text_ready.emit(text + " ")
+                    safe_debug(f"DEBUG: {service_name} transcription successful: '{text}'")
                     return
                 except Exception as e:
                     safe_debug(f"DEBUG: {service_name} transcription attempt failed: {safe_error_text(e)}")
@@ -2291,9 +2304,11 @@ class MainWindow(QMainWindow):
                         text = self._transcribe_file_with_service(filepath, service_name)
                     self.comm.import_text_ready.emit(text)
                     self.comm.status.emit("Transcription added to Raw Transcription.")
+                    safe_debug(f"DEBUG: Import transcription via {service_name} succeeded.")
                     return
                 except Exception as e:
                     failures.append(f"{service_name}: {safe_error_text(e)}")
+                    safe_debug(f"DEBUG: Import transcription via {service_name} failed: {safe_error_text(e)}")
             self.comm.error.emit("All transcription attempts failed:\n" + "\n".join(failures))
         finally:
             self.comm.import_finished.emit()
@@ -2528,6 +2543,7 @@ def check_dependencies():
         QMessageBox.warning(None, "Missing Dependencies", msg)
 
 if __name__ == "__main__":
+    configure_stdio_encoding()
     app = QApplication(sys.argv)
     app.setApplicationName("PressScribe")
     if sys.platform.startswith("linux"):
