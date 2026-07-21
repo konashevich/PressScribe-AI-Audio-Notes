@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
@@ -247,6 +248,11 @@ fun TranscriptionApp(
         }
     }
 
+    val openSavedNotes = {
+        wideScreen = EditorScreen.NOTES
+        uiScope.launch { pagerState.animateScrollToPage(1) }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             modifier = Modifier.fillMaxSize(),
@@ -330,79 +336,46 @@ fun TranscriptionApp(
                 BoxWithConstraints(
                     modifier = Modifier.fillMaxSize(),
                 ) {
-                val wideLayout = maxWidth >= 900.dp
+                    val wideLayout = maxWidth >= 900.dp
 
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    state.importedAudio?.let { importedAudio ->
-                        ImportedAudioCard(
-                            importedAudio = importedAudio,
-                            expanded = importedExpanded,
-                            isBusy = state.isTranscribing || state.isImportingAudio,
-                            onExpandedChange = { importedExpanded = it },
-                            onTranscribe = viewModel::transcribeImportedAudio,
-                            onSave = {
-                                saveImportedAudioLauncher.launch(
-                                    CreateDocumentRequest(
-                                        mimeType = importedAudio.mimeType,
-                                        displayName = importedAudio.displayName,
-                                    ),
-                                )
-                            },
-                            onClear = viewModel::clearImportedAudio,
-                        )
-                    }
-
-                    if (wideLayout) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { wideScreen = EditorScreen.EDITOR }) {
-                                Text("Editor")
-                            }
-                            Button(onClick = { wideScreen = EditorScreen.NOTES }) {
-                                Text("Saved Notes")
-                            }
-                        }
-                        if (wideScreen == EditorScreen.EDITOR) {
-                            EditorContent(
-                                modifier = Modifier.fillMaxSize(),
-                                wideLayout = true,
-                                state = state,
-                                viewModel = viewModel,
-                                hasRecordPermission = hasRecordPermission,
-                                onEnsurePermission = ensureRecordPermission,
-                                onRequestPermission = { recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
-                                copyRawText = { clipboardManager.setText(AnnotatedString(state.rawTextValue.text)) },
-                                copyPolishedText = { clipboardManager.setText(AnnotatedString(state.polishedTextValue.text)) },
-                                sharePolishedText = sharePolishedText,
-                            )
-                        } else {
-                            SavedNotesScreen(
-                                modifier = Modifier.fillMaxSize(),
-                                state = state,
-                                onOpenNote = viewModel::openSavedNote,
-                                onCloseNote = viewModel::closeSavedNote,
-                                onUpdateNote = viewModel::updatePolishedText,
-                                onCopyNote = { text -> clipboardManager.setText(AnnotatedString(text)) },
-                                onDeleteNote = { pendingDelete = DeleteRequest.One(it) },
-                                onToggleSelected = viewModel::toggleNoteSelection,
-                                onClearSelection = viewModel::clearNoteSelection,
-                                onDeleteSelected = { pendingDelete = DeleteRequest.Selected },
-                                onDeleteAll = { pendingDelete = DeleteRequest.All },
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        state.importedAudio?.let { importedAudio ->
+                            ImportedAudioCard(
+                                importedAudio = importedAudio,
+                                expanded = importedExpanded,
+                                isBusy = state.isTranscribing || state.isImportingAudio,
+                                onExpandedChange = { importedExpanded = it },
+                                onTranscribe = viewModel::transcribeImportedAudio,
+                                onSave = {
+                                    saveImportedAudioLauncher.launch(
+                                        CreateDocumentRequest(
+                                            mimeType = importedAudio.mimeType,
+                                            displayName = importedAudio.displayName,
+                                        ),
+                                    )
+                                },
+                                onClear = viewModel::clearImportedAudio,
                             )
                         }
-                    } else {
-                        HorizontalPager(
-                            state = pagerState,
-                            modifier = Modifier.fillMaxSize(),
-                        ) { page ->
-                            if (page == 0) {
+
+                        if (wideLayout) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { wideScreen = EditorScreen.EDITOR }) {
+                                    Text("Editor")
+                                }
+                                Button(onClick = { wideScreen = EditorScreen.NOTES }) {
+                                    Text("Saved Notes")
+                                }
+                            }
+                            if (wideScreen == EditorScreen.EDITOR) {
                                 EditorContent(
                                     modifier = Modifier.fillMaxSize(),
-                                    wideLayout = false,
+                                    wideLayout = true,
                                     state = state,
                                     viewModel = viewModel,
                                     hasRecordPermission = hasRecordPermission,
@@ -411,6 +384,7 @@ fun TranscriptionApp(
                                     copyRawText = { clipboardManager.setText(AnnotatedString(state.rawTextValue.text)) },
                                     copyPolishedText = { clipboardManager.setText(AnnotatedString(state.polishedTextValue.text)) },
                                     sharePolishedText = sharePolishedText,
+                                    onOpenNotes = openSavedNotes,
                                 )
                             } else {
                                 SavedNotesScreen(
@@ -427,16 +401,51 @@ fun TranscriptionApp(
                                     onDeleteAll = { pendingDelete = DeleteRequest.All },
                                 )
                             }
+                        } else {
+                            HorizontalPager(
+                                state = pagerState,
+                                modifier = Modifier.fillMaxSize(),
+                            ) { page ->
+                                if (page == 0) {
+                                    EditorContent(
+                                        modifier = Modifier.fillMaxSize(),
+                                        wideLayout = false,
+                                        state = state,
+                                        viewModel = viewModel,
+                                        hasRecordPermission = hasRecordPermission,
+                                        onEnsurePermission = ensureRecordPermission,
+                                        onRequestPermission = { recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+                                        copyRawText = { clipboardManager.setText(AnnotatedString(state.rawTextValue.text)) },
+                                        copyPolishedText = { clipboardManager.setText(AnnotatedString(state.polishedTextValue.text)) },
+                                        sharePolishedText = sharePolishedText,
+                                        onOpenNotes = openSavedNotes,
+                                    )
+                                } else {
+                                    SavedNotesScreen(
+                                        modifier = Modifier.fillMaxSize(),
+                                        state = state,
+                                        onOpenNote = viewModel::openSavedNote,
+                                        onCloseNote = viewModel::closeSavedNote,
+                                        onUpdateNote = viewModel::updatePolishedText,
+                                        onCopyNote = { text -> clipboardManager.setText(AnnotatedString(text)) },
+                                        onDeleteNote = { pendingDelete = DeleteRequest.One(it) },
+                                        onToggleSelected = viewModel::toggleNoteSelection,
+                                        onClearSelection = viewModel::clearNoteSelection,
+                                        onDeleteSelected = { pendingDelete = DeleteRequest.Selected },
+                                        onDeleteAll = { pendingDelete = DeleteRequest.All },
+                                    )
+                                }
+                            }
                         }
                     }
-                }
                 }
 
                 SnackbarHost(
                     hostState = snackbarHostState,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .padding(top = 8.dp),
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
                 )
             }
         }
@@ -520,6 +529,7 @@ private fun EditorContent(
     copyRawText: () -> Unit,
     copyPolishedText: () -> Unit,
     sharePolishedText: () -> Unit,
+    onOpenNotes: () -> Unit,
 ) {
     if (wideLayout) {
         Row(
@@ -541,6 +551,7 @@ private fun EditorContent(
                 viewModel = viewModel,
                 clipboardText = copyPolishedText,
                 shareText = sharePolishedText,
+                onOpenNotes = onOpenNotes,
             )
         }
     } else {
@@ -563,6 +574,7 @@ private fun EditorContent(
                 viewModel = viewModel,
                 clipboardText = copyPolishedText,
                 shareText = sharePolishedText,
+                onOpenNotes = onOpenNotes,
             )
         }
     }
@@ -1040,6 +1052,7 @@ private fun PolishedEditorPanel(
     viewModel: MainViewModel,
     clipboardText: () -> Unit,
     shareText: () -> Unit,
+    onOpenNotes: () -> Unit,
 ) {
     EditorPanel(
         modifier = modifier,
@@ -1076,6 +1089,13 @@ private fun PolishedEditorPanel(
                 onClick = viewModel::clearAllText,
             )
         },
+        trailingControls = {
+            ActionIconButton(
+                icon = Icons.Filled.KeyboardArrowLeft,
+                contentDescription = "Open saved notes",
+                onClick = onOpenNotes,
+            )
+        },
     )
 }
 
@@ -1087,6 +1107,7 @@ private fun EditorPanel(
     onValueChange: (TextFieldValue) -> Unit,
     fontSizeSp: Int,
     controls: @Composable () -> Unit,
+    trailingControls: (@Composable () -> Unit)? = null,
 ) {
     Card(modifier = modifier.fillMaxWidth()) {
         val editorTextStyle = MaterialTheme.typography.bodyLarge.copy(
@@ -1117,14 +1138,33 @@ private fun EditorPanel(
                 singleLine = false,
             )
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                controls()
+            if (trailingControls == null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    controls()
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        controls()
+                    }
+                    trailingControls()
+                }
             }
         }
     }
