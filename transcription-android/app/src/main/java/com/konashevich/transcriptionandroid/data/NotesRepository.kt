@@ -10,7 +10,6 @@ import java.util.UUID
 
 data class SavedNote(
     val id: String,
-    val title: String,
     val content: String,
     val createdAt: Long,
     val updatedAt: Long,
@@ -53,7 +52,6 @@ class NotesRepository(context: Context) {
         val now = System.currentTimeMillis()
         return SavedNote(
             id = UUID.randomUUID().toString(),
-            title = titleFromContent(content),
             content = content,
             createdAt = now,
             updatedAt = now,
@@ -61,27 +59,21 @@ class NotesRepository(context: Context) {
         )
     }
 
-    fun updateNote(note: SavedNote, content: String): SavedNote {
+    fun updateNote(
+        note: SavedNote,
+        content: String,
+        origin: String = note.origin,
+    ): SavedNote {
         return note.copy(
-            title = titleFromContent(content),
             content = content,
             updatedAt = System.currentTimeMillis(),
+            origin = origin,
         )
     }
 
     companion object {
         const val ORIGIN_POLISHED_TEXT = "polished_text"
         const val ORIGIN_RAW_TEXT = "raw_text"
-
-        fun titleFromContent(content: String): String {
-            return content
-                .trim()
-                .split(Regex("\\s+"))
-                .filter(String::isNotBlank)
-                .take(8)
-                .joinToString(" ")
-                .ifBlank { "Untitled note" }
-        }
     }
 }
 
@@ -92,7 +84,6 @@ private fun JSONObject.toSavedNote(): SavedNote? {
     val updatedAt = optLong("updatedAt", createdAt)
     return SavedNote(
         id = id,
-        title = optString("title").ifBlank { NotesRepository.titleFromContent(content) },
         content = content,
         createdAt = createdAt,
         updatedAt = updatedAt,
@@ -103,7 +94,6 @@ private fun JSONObject.toSavedNote(): SavedNote? {
 private fun SavedNote.toJson(): JSONObject {
     return JSONObject()
         .put("id", id)
-        .put("title", title)
         .put("content", content)
         .put("createdAt", createdAt)
         .put("updatedAt", updatedAt)

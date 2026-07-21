@@ -610,7 +610,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val nextNote = if (activeNote == null) {
             notesRepository.newNote(trimmed, origin = origin)
         } else {
-            notesRepository.updateNote(activeNote, trimmed)
+            notesRepository.updateNote(activeNote, trimmed, origin = origin)
         }
 
         val nextNotes = (state.savedNotes.filterNot { it.id == nextNote.id } + nextNote)
