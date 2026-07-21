@@ -1424,25 +1424,25 @@ class MainWindow(QMainWindow):
         print(f"DEBUG: Starting {service_name} transcription of entire audio.")
         try:
             text = self._transcribe_with_service(audio_data_to_recognize, service_name)
-            print(f"DEBUG: {service_name} transcription successful: '{text}'")
+            safe_debug(f"DEBUG: {service_name} transcription successful: '{text}'")
             self.comm.text_ready.emit(text + " ")
         except Exception as e:
-            print(f"DEBUG: {service_name} transcription error: {e}")
-            self.comm.error.emit(f"{service_name} transcription error: {e}")
+            safe_debug(f"DEBUG: {service_name} transcription error: {safe_error_text(e)}")
+            self.comm.error.emit(f"{service_name} transcription error: {safe_error_text(e)}")
         finally:
             self.comm.transcription_finished.emit()
 
     def process_audio_with_fallbacks(self, audio_data_to_recognize, primary_service):
         attempt_order = self.get_transcription_fallback_order(primary_service)
-        print(f"DEBUG: Transcription fallback order: {attempt_order}")
+        safe_debug(f"DEBUG: Transcription fallback order: {attempt_order}")
         failures = []
 
         try:
             for attempt_number, service_name in enumerate(attempt_order, start=1):
                 try:
-                    print(f"DEBUG: Transcription attempt {attempt_number} using {service_name}")
+                    safe_debug(f"DEBUG: Transcription attempt {attempt_number} using {service_name}")
                     text = self._transcribe_with_service(audio_data_to_recognize, service_name)
-                    print(f"DEBUG: {service_name} transcription successful: '{text}'")
+                    safe_debug(f"DEBUG: {service_name} transcription successful: '{text}'")
                     self.comm.text_ready.emit(text + " ")
                     return
                 except Exception as e:
