@@ -321,13 +321,15 @@ fun TranscriptionApp(
                     },
                 )
             },
-            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         ) { innerPadding ->
-            BoxWithConstraints(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding),
             ) {
+                BoxWithConstraints(
+                    modifier = Modifier.fillMaxSize(),
+                ) {
                 val wideLayout = maxWidth >= 900.dp
 
                 Column(
@@ -428,6 +430,14 @@ fun TranscriptionApp(
                         }
                     }
                 }
+                }
+
+                SnackbarHost(
+                    hostState = snackbarHostState,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 8.dp),
+                )
             }
         }
 
