@@ -123,6 +123,59 @@ class GeminiApiClient(
             .ifBlank { throw IllegalStateException("Gemini returned an empty polished result.") }
     }
 
+    suspend fun polishAndTranslateText(
+        text: String,
+        settings: AppSettings,
+    ): String = withContext(Dispatchers.IO) {
+        val apiKey = settings.geminiApiKey.trim()
+        if (apiKey.isEmpty()) {
+            throw IllegalStateException("Gemini API key is not configured.")
+        }
+        val languageCode = settings.translateLanguageCode.trim()
+        if (languageCode.isEmpty()) {
+            throw IllegalStateException("Translation language is not configured.")
+        }
+        val model = settings.resolvedGeminiModel()
+        val systemPrompt = resolveTranslatePrompt(
+            template = settings.translatePolishPrompt,
+            languageCode = languageCode,
+        )
+
+        val payload = JSONObject()
+            .put(
+                "system_instruction",
+                JSONObject().put(
+                    "parts",
+                    JSONArray().put(
+                        JSONObject().put("text", systemPrompt),
+                    ),
+                ),
+            )
+            .put(
+                "contents",
+                JSONArray().put(
+                    JSONObject()
+                        .put("role", "user")
+                        .put(
+                            "parts",
+                            JSONArray().put(
+                                JSONObject().put("text", text),
+                            ),
+                        ),
+                ),
+            )
+
+        val request = Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+            .header("x-goog-api-key", apiKey)
+            .header("Content-Type", jsonMediaType.toString())
+            .post(payload.toString().toRequestBody(jsonMediaType))
+            .build()
+
+        extractText(executeRequest(request))
+            .ifBlank { throw IllegalStateException("Gemini returned an empty translation result.") }
+    }
+
     private fun uploadFile(file: File, mimeType: String, apiKey: String): UploadedGeminiFile {
         val startPayload = JSONObject()
             .put(

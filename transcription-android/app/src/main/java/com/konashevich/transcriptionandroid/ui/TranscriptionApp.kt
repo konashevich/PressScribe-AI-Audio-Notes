@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -93,6 +94,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.geometry.CornerRadius
@@ -115,6 +117,8 @@ import com.konashevich.pressscribe.data.ImportedAudio
 import com.konashevich.pressscribe.data.ListenMode
 import com.konashevich.pressscribe.data.NotesRepository
 import com.konashevich.pressscribe.data.SavedNote
+import com.konashevich.pressscribe.data.findTranslateLanguage
+import com.konashevich.pressscribe.data.isConfiguredTranslateLanguage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -134,6 +138,7 @@ fun TranscriptionApp(
 
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showAbout by rememberSaveable { mutableStateOf(false) }
+    var showTranslateLanguagePicker by rememberSaveable { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
     var importedExpanded by rememberSaveable(state.importedAudio?.file?.absolutePath) { mutableStateOf(false) }
     var previousRecordingState by remember { mutableStateOf(state.isRecording) }
@@ -391,6 +396,7 @@ fun TranscriptionApp(
                                     copyPolishedText = { clipboardManager.setText(AnnotatedString(state.polishedTextValue.text)) },
                                     sharePolishedText = sharePolishedText,
                                     onOpenNotes = openSavedNotes,
+                                    onRequestTranslateLanguage = { showTranslateLanguagePicker = true },
                                 )
                             } else {
                                 SavedNotesScreen(
@@ -425,6 +431,7 @@ fun TranscriptionApp(
                                         copyPolishedText = { clipboardManager.setText(AnnotatedString(state.polishedTextValue.text)) },
                                         sharePolishedText = sharePolishedText,
                                         onOpenNotes = openSavedNotes,
+                                        onRequestTranslateLanguage = { showTranslateLanguagePicker = true },
                                     )
                                 } else {
                                     SavedNotesScreen(
@@ -475,6 +482,8 @@ fun TranscriptionApp(
             onGeminiApiKeyChanged = viewModel::updateGeminiApiKey,
             onGeminiModelChanged = viewModel::updateGeminiModel,
             onPolishPromptChanged = viewModel::updatePolishPrompt,
+            onTranslatePolishPromptChanged = viewModel::updateTranslatePolishPrompt,
+            onTranslateLanguageChanged = viewModel::updateTranslateLanguageCode,
             onServerSchemeChanged = viewModel::updateServerScheme,
             onServerHostChanged = viewModel::updateServerHost,
             onServerPortChanged = viewModel::updateServerPort,
@@ -502,6 +511,17 @@ fun TranscriptionApp(
                     "Android edition of PressScribe with the same raw/polished workflow, " +
                         "Gemini polishing, Gemini or self-hosted transcription, and audio sharing from other apps.",
                 )
+            },
+        )
+    }
+
+    if (showTranslateLanguagePicker) {
+        TranslateLanguagePickerDialog(
+            selectedCode = state.settings.translateLanguageCode,
+            onDismiss = { showTranslateLanguagePicker = false },
+            onConfirm = { code ->
+                viewModel.updateTranslateLanguageCode(code)
+                showTranslateLanguagePicker = false
             },
         )
     }
@@ -536,6 +556,7 @@ private fun EditorContent(
     copyPolishedText: () -> Unit,
     sharePolishedText: () -> Unit,
     onOpenNotes: () -> Unit,
+    onRequestTranslateLanguage: () -> Unit,
 ) {
     if (wideLayout) {
         Row(
@@ -550,6 +571,7 @@ private fun EditorContent(
                 onEnsurePermission = onEnsurePermission,
                 onRequestPermission = onRequestPermission,
                 clipboardText = copyRawText,
+                onRequestTranslateLanguage = onRequestTranslateLanguage,
             )
             PolishedEditorPanel(
                 modifier = Modifier.weight(1f),
@@ -573,6 +595,7 @@ private fun EditorContent(
                 onEnsurePermission = onEnsurePermission,
                 onRequestPermission = onRequestPermission,
                 clipboardText = copyRawText,
+                onRequestTranslateLanguage = onRequestTranslateLanguage,
             )
             PolishedEditorPanel(
                 modifier = Modifier.weight(1f),
@@ -1029,6 +1052,7 @@ private fun RawEditorPanel(
     onEnsurePermission: () -> Unit,
     onRequestPermission: () -> Unit,
     clipboardText: () -> Unit,
+    onRequestTranslateLanguage: () -> Unit,
 ) {
     EditorPanel(
         modifier = modifier,
@@ -1056,6 +1080,17 @@ private fun RawEditorPanel(
                 contentDescription = "Polish text",
                 isBusy = state.isPolishing,
                 onClick = viewModel::polishText,
+            )
+            TranslateActionButton(
+                languageCode = state.settings.translateLanguageCode,
+                isBusy = state.isPolishing,
+                onClick = {
+                    if (!isConfiguredTranslateLanguage(state.settings.translateLanguageCode)) {
+                        onRequestTranslateLanguage()
+                    } else {
+                        viewModel.polishAndTranslateText()
+                    }
+                },
             )
             ActionIconButton(
                 icon = Icons.Filled.Save,
@@ -1287,6 +1322,79 @@ private fun ActionIconButton(
             )
         }
     }
+}
+
+@Composable
+private fun TranslateActionButton(
+    languageCode: String,
+    isBusy: Boolean,
+    onClick: () -> Unit,
+) {
+    val language = findTranslateLanguage(languageCode)
+    OutlinedButton(
+        onClick = onClick,
+        enabled = !isBusy,
+        contentPadding = PaddingValues(0.dp),
+        modifier = Modifier.size(40.dp),
+    ) {
+        when {
+            isBusy -> {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                )
+            }
+            language == null -> {
+                Icon(
+                    imageVector = Icons.Filled.Translate,
+                    contentDescription = "Choose translation language",
+                )
+            }
+            else -> {
+                Text(
+                    text = language.buttonCode(),
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TranslateLanguagePickerDialog(
+    selectedCode: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var pendingCode by rememberSaveable(selectedCode) {
+        mutableStateOf(selectedCode.ifBlank { "en" })
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(pendingCode) },
+                enabled = pendingCode.isNotBlank(),
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+        title = { Text("Translation language") },
+        text = {
+            TranslateLanguageDropdown(
+                selectedCode = pendingCode,
+                onSelected = { pendingCode = it },
+            )
+        },
+    )
 }
 
 @Composable

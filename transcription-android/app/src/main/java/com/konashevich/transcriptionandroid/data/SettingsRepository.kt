@@ -24,6 +24,11 @@ class SettingsRepository(private val context: Context) {
             geminiApiKey = prefs[Keys.GEMINI_API_KEY].orEmpty().trim(),
             geminiModel = normalizeGeminiModel(prefs[Keys.GEMINI_MODEL].orEmpty()),
             polishPrompt = prefs[Keys.POLISH_PROMPT].orEmpty().ifBlank { DEFAULT_POLISH_PROMPT },
+            translatePolishPrompt = prefs[Keys.TRANSLATE_POLISH_PROMPT].orEmpty()
+                .ifBlank { DEFAULT_TRANSLATE_POLISH_PROMPT },
+            translateLanguageCode = normalizeTranslateLanguageCode(
+                prefs[Keys.TRANSLATE_LANGUAGE_CODE].orEmpty(),
+            ),
             serverScheme = prefs[Keys.SERVER_SCHEME].toEnumOrDefault(ServerScheme.HTTP),
             serverHost = prefs[Keys.SERVER_HOST].orEmpty(),
             serverPort = prefs[Keys.SERVER_PORT].orEmpty().ifBlank { "8711" },
@@ -52,6 +57,12 @@ class SettingsRepository(private val context: Context) {
         editString(Keys.GEMINI_MODEL, normalizeGeminiModel(value))
 
     suspend fun updatePolishPrompt(value: String) = editString(Keys.POLISH_PROMPT, value)
+
+    suspend fun updateTranslatePolishPrompt(value: String) =
+        editString(Keys.TRANSLATE_POLISH_PROMPT, value)
+
+    suspend fun updateTranslateLanguageCode(value: String) =
+        editString(Keys.TRANSLATE_LANGUAGE_CODE, normalizeTranslateLanguageCode(value))
 
     suspend fun updateServerScheme(value: ServerScheme) = editString(Keys.SERVER_SCHEME, value.name)
 
@@ -89,6 +100,10 @@ class SettingsRepository(private val context: Context) {
             patch.geminiApiKey?.let { prefs[Keys.GEMINI_API_KEY] = it.trim() }
             patch.geminiModel?.let { prefs[Keys.GEMINI_MODEL] = normalizeGeminiModel(it) }
             patch.polishPrompt?.let { prefs[Keys.POLISH_PROMPT] = it }
+            patch.translatePolishPrompt?.let { prefs[Keys.TRANSLATE_POLISH_PROMPT] = it }
+            patch.translateLanguageCode?.let {
+                prefs[Keys.TRANSLATE_LANGUAGE_CODE] = normalizeTranslateLanguageCode(it)
+            }
             patch.serverScheme?.let { prefs[Keys.SERVER_SCHEME] = it.name }
             patch.serverHost?.let { prefs[Keys.SERVER_HOST] = it }
             patch.serverPort?.let { prefs[Keys.SERVER_PORT] = it }
@@ -116,6 +131,8 @@ class SettingsRepository(private val context: Context) {
         val GEMINI_API_KEY = stringPreferencesKey("gemini_api_key")
         val GEMINI_MODEL = stringPreferencesKey("gemini_model")
         val POLISH_PROMPT = stringPreferencesKey("polish_prompt")
+        val TRANSLATE_POLISH_PROMPT = stringPreferencesKey("translate_polish_prompt")
+        val TRANSLATE_LANGUAGE_CODE = stringPreferencesKey("translate_language_code")
         val SERVER_SCHEME = stringPreferencesKey("server_scheme")
         val SERVER_HOST = stringPreferencesKey("server_host")
         val SERVER_PORT = stringPreferencesKey("server_port")

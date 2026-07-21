@@ -18,9 +18,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -30,6 +34,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -41,9 +46,12 @@ import com.konashevich.pressscribe.data.AppSettings
 import com.konashevich.pressscribe.data.FontSizeOption
 import com.konashevich.pressscribe.data.ListenMode
 import com.konashevich.pressscribe.data.ServerScheme
+import com.konashevich.pressscribe.data.TRANSLATE_LANGUAGE_PLACEHOLDER
+import com.konashevich.pressscribe.data.TRANSLATE_LANGUAGES
 import com.konashevich.pressscribe.data.ThemeMode
 import com.konashevich.pressscribe.data.TranscriptionService
 import com.konashevich.pressscribe.data.VolumeButtonMode
+import com.konashevich.pressscribe.data.findTranslateLanguage
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -58,6 +66,8 @@ fun SettingsSheet(
     onGeminiApiKeyChanged: (String) -> Unit,
     onGeminiModelChanged: (String) -> Unit,
     onPolishPromptChanged: (String) -> Unit,
+    onTranslatePolishPromptChanged: (String) -> Unit,
+    onTranslateLanguageChanged: (String) -> Unit,
     onServerSchemeChanged: (ServerScheme) -> Unit,
     onServerHostChanged: (String) -> Unit,
     onServerPortChanged: (String) -> Unit,
@@ -269,7 +279,108 @@ fun SettingsSheet(
                 )
             }
 
+            SettingsSection("Polish + Translate") {
+                TranslateLanguageDropdown(
+                    selectedCode = settings.translateLanguageCode,
+                    onSelected = onTranslateLanguageChanged,
+                )
+                OutlinedTextField(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 180.dp),
+                    value = settings.translatePolishPrompt,
+                    onValueChange = onTranslatePolishPromptChanged,
+                    label = { Text("Translate System Prompt") },
+                    supportingText = {
+                        Text("Use $TRANSLATE_LANGUAGE_PLACEHOLDER for the target language name.")
+                    },
+                )
+            }
+
             Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TranslateLanguageDropdown(
+    selectedCode: String,
+    onSelected: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    val selected = remember(selectedCode) { findTranslateLanguage(selectedCode) }
+    val displayText = selected?.let { "${it.label} (${it.buttonCode()})" }.orEmpty()
+    val filteredLanguages = remember(query) {
+        val needle = query.trim()
+        if (needle.isEmpty()) {
+            TRANSLATE_LANGUAGES
+        } else {
+            TRANSLATE_LANGUAGES.filter { language ->
+                language.label.contains(needle, ignoreCase = true) ||
+                    language.code.contains(needle, ignoreCase = true) ||
+                    language.buttonCode().contains(needle, ignoreCase = true)
+            }
+        }
+    }
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = query,
+            onValueChange = {
+                query = it
+                if (!expanded) {
+                    expanded = true
+                }
+            },
+            label = { Text("Search languages") },
+            singleLine = true,
+        )
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = it },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            OutlinedTextField(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(MenuAnchorType.PrimaryNotEditable),
+                value = displayText,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Target language") },
+                placeholder = { Text("Select language") },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+            ) {
+                if (filteredLanguages.isEmpty()) {
+                    DropdownMenuItem(
+                        text = { Text("No matches") },
+                        onClick = {},
+                        enabled = false,
+                    )
+                } else {
+                    filteredLanguages.forEach { language ->
+                        DropdownMenuItem(
+                            text = { Text("${language.label} (${language.buttonCode()})") },
+                            onClick = {
+                                onSelected(language.code)
+                                query = ""
+                                expanded = false
+                            },
+                        )
+                    }
+                }
+            }
         }
     }
 }

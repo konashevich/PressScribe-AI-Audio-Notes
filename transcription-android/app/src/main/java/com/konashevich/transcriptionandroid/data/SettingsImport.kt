@@ -12,6 +12,8 @@ data class SettingsImportPatch(
     val geminiApiKey: String? = null,
     val geminiModel: String? = null,
     val polishPrompt: String? = null,
+    val translatePolishPrompt: String? = null,
+    val translateLanguageCode: String? = null,
     val serverScheme: ServerScheme? = null,
     val serverHost: String? = null,
     val serverPort: String? = null,
@@ -28,6 +30,8 @@ data class SettingsImportPatch(
             geminiApiKey != null ||
             geminiModel != null ||
             polishPrompt != null ||
+            translatePolishPrompt != null ||
+            translateLanguageCode != null ||
             serverScheme != null ||
             serverHost != null ||
             serverPort != null ||
@@ -52,6 +56,10 @@ fun parseDesktopSettingsImport(content: String): SettingsImportPatch {
         geminiApiKey = root.optImportedString("api_key"),
         geminiModel = root.optImportedString("gemini_model")?.let(::normalizeGeminiModel),
         polishPrompt = root.optImportedString("system_prompt"),
+        translatePolishPrompt = root.optImportedString("translate_system_prompt")
+            ?: root.optImportedString("translate_polish_prompt"),
+        translateLanguageCode = root.optImportedString("translate_language")
+            ?: root.optImportedString("translate_language_code"),
         serverScheme = importedAsrUrl?.scheme,
         serverHost = importedAsrUrl?.host,
         serverPort = importedAsrUrl?.port,

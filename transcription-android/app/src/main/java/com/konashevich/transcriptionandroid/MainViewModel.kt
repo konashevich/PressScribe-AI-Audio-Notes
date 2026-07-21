@@ -15,8 +15,10 @@ import com.konashevich.pressscribe.data.GeminiApiClient
 import com.konashevich.pressscribe.data.ImportedAudio
 import com.konashevich.pressscribe.data.ListenMode
 import com.konashevich.pressscribe.data.NotesRepository
+import com.konashevich.pressscribe.data.normalizeTranslateLanguageCode
 import com.konashevich.pressscribe.data.parseDesktopSettingsImport
 import com.konashevich.pressscribe.data.SavedNote
+import com.konashevich.pressscribe.data.isConfiguredTranslateLanguage
 import com.konashevich.pressscribe.data.SelfHostedAsrClient
 import com.konashevich.pressscribe.data.ServerScheme
 import com.konashevich.pressscribe.data.SettingsRepository
@@ -311,6 +313,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun polishAndTranslateText() {
+        if (_uiState.value.isPolishing) {
+            return
+        }
+
+        val languageCode = _uiState.value.settings.translateLanguageCode.trim()
+        if (!isConfiguredTranslateLanguage(languageCode)) {
+            emitMessage("Choose a translation language first.")
+            return
+        }
+
+        val rawText = _uiState.value.rawTextValue
+        val textToProcess = selectedText(rawText).ifBlank { rawText.text.trim() }
+        if (textToProcess.isBlank()) {
+            emitMessage("Nothing to translate.")
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isPolishing = true) }
+            try {
+                val translated = geminiApiClient.polishAndTranslateText(
+                    text = textToProcess,
+                    settings = _uiState.value.settings,
+                )
+                _uiState.update { state ->
+                    state.copy(
+                        polishedTextValue = insertIntoField(
+                            current = state.polishedTextValue,
+                            insertion = translated.trim(),
+                        ),
+                    )
+                }
+                if (_uiState.value.settings.autoSaveNotes) {
+                    saveCurrentPolishedNote(createIfMissing = true, showMessage = false)
+                }
+                emitMessage("Translated text added.")
+            } catch (error: Exception) {
+                emitMessage("Translate failed: ${error.message ?: error.javaClass.simpleName}")
+            } finally {
+                _uiState.update { it.copy(isPolishing = false) }
+            }
+        }
+    }
+
     fun exportSessionTo(uri: Uri) {
         viewModelScope.launch {
             runCatching {
@@ -421,6 +468,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateGeminiModel(value: String) = persist { settingsRepository.updateGeminiModel(value) }
 
     fun updatePolishPrompt(value: String) = persist { settingsRepository.updatePolishPrompt(value) }
+
+    fun updateTranslatePolishPrompt(value: String) =
+        persist { settingsRepository.updateTranslatePolishPrompt(value) }
+
+    fun updateTranslateLanguageCode(value: String) {
+        val normalized = normalizeTranslateLanguageCode(value)
+        _uiState.update {
+            it.copy(settings = it.settings.copy(translateLanguageCode = normalized))
+        }
+        persist { settingsRepository.updateTranslateLanguageCode(normalized) }
+    }
 
     fun updateServerScheme(value: ServerScheme) = persist { settingsRepository.updateServerScheme(value) }
 
