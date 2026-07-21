@@ -89,8 +89,12 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -109,6 +113,7 @@ import com.konashevich.pressscribe.MainViewModel
 import com.konashevich.pressscribe.UiEvent
 import com.konashevich.pressscribe.data.ImportedAudio
 import com.konashevich.pressscribe.data.ListenMode
+import com.konashevich.pressscribe.data.NotesRepository
 import com.konashevich.pressscribe.data.SavedNote
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -725,7 +730,7 @@ private fun SavedNoteRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(10.dp),
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -734,21 +739,14 @@ private fun SavedNoteRow(
                 contentDescription = if (selected) "Deselect note" else "Select note",
                 onClick = onToggleSelected,
             )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = note.title,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = note.content,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+            Text(
+                text = rememberSavedNotePreview(note),
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
             ActionIconButton(
                 icon = Icons.Filled.ContentCopy,
                 contentDescription = "Copy note",
@@ -762,6 +760,32 @@ private fun SavedNoteRow(
         }
     }
 }
+
+@Composable
+private fun rememberSavedNotePreview(note: SavedNote): AnnotatedString {
+    val tag = savedNoteOriginLabel(note.origin)
+    val tagColor = MaterialTheme.colorScheme.primary
+    val content = note.content.trim()
+    return remember(note.id, note.origin, note.content, tagColor) {
+        buildAnnotatedString {
+            withStyle(
+                SpanStyle(
+                    fontWeight = FontWeight.SemiBold,
+                    color = tagColor,
+                ),
+            ) {
+                append("$tag: ")
+            }
+            append(content)
+        }
+    }
+}
+
+private fun savedNoteOriginLabel(origin: String): String =
+    when (origin) {
+        NotesRepository.ORIGIN_RAW_TEXT -> "Raw"
+        else -> "Polished"
+    }
 
 @Composable
 private fun SavedNoteDetail(
@@ -796,9 +820,10 @@ private fun SavedNoteDetail(
                     onClick = onBack,
                 )
                 Text(
-                    text = note.title,
+                    text = savedNoteOriginLabel(note.origin),
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -1033,6 +1058,12 @@ private fun RawEditorPanel(
                 onClick = viewModel::polishText,
             )
             ActionIconButton(
+                icon = Icons.Filled.Save,
+                contentDescription = "Save raw transcription as note",
+                enabled = state.rawTextValue.text.trim().isNotBlank(),
+                onClick = viewModel::manualSaveRawNote,
+            )
+            ActionIconButton(
                 icon = Icons.Filled.ContentCopy,
                 contentDescription = "Copy raw transcription",
                 onClick = clipboardText,
@@ -1071,7 +1102,7 @@ private fun PolishedEditorPanel(
             ActionIconButton(
                 icon = Icons.Filled.Save,
                 contentDescription = "Save polished text as note",
-                enabled = state.polishedTextValue.text.isNotBlank(),
+                enabled = state.polishedTextValue.text.trim().isNotBlank(),
                 onClick = viewModel::manualSaveCurrentNote,
             )
             ActionIconButton(

@@ -71,6 +71,7 @@ class NotesRepository(context: Context) {
 
     companion object {
         const val ORIGIN_POLISHED_TEXT = "polished_text"
+        const val ORIGIN_RAW_TEXT = "raw_text"
 
         fun titleFromContent(content: String): String {
             return content

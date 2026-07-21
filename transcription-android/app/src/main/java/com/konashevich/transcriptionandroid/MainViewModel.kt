@@ -451,7 +451,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateAutoSaveNotes(value: Boolean) = persist { settingsRepository.updateAutoSaveNotes(value) }
 
     fun manualSaveCurrentNote() {
-        saveCurrentPolishedNote(createIfMissing = true, showMessage = true)
+        saveNoteFromText(
+            content = _uiState.value.polishedTextValue.text,
+            origin = NotesRepository.ORIGIN_POLISHED_TEXT,
+            createIfMissing = true,
+            showMessage = true,
+        )
+    }
+
+    fun manualSaveRawNote() {
+        val trimmed = _uiState.value.rawTextValue.text.trim()
+        if (trimmed.isBlank()) {
+            emitMessage("Nothing to save.")
+            return
+        }
+
+        val nextNote = notesRepository.newNote(
+            content = trimmed,
+            origin = NotesRepository.ORIGIN_RAW_TEXT,
+        )
+        val nextNotes = (_uiState.value.savedNotes + nextNote)
+            .sortedByDescending { it.createdAt }
+
+        _uiState.update { it.copy(savedNotes = nextNotes) }
+        persistSavedNotes(nextNotes)
+        emitMessage("Note saved.")
     }
 
     fun openSavedNote(noteId: String) {
@@ -552,8 +576,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         createIfMissing: Boolean,
         showMessage: Boolean,
     ) {
-        val content = _uiState.value.polishedTextValue.text.trim()
-        if (content.isBlank()) {
+        saveNoteFromText(
+            content = _uiState.value.polishedTextValue.text,
+            origin = NotesRepository.ORIGIN_POLISHED_TEXT,
+            createIfMissing = createIfMissing,
+            showMessage = showMessage,
+        )
+    }
+
+    private fun saveNoteFromText(
+        content: String,
+        origin: String,
+        createIfMissing: Boolean,
+        showMessage: Boolean,
+    ) {
+        val trimmed = content.trim()
+        if (trimmed.isBlank()) {
             if (showMessage) {
                 emitMessage("Nothing to save.")
             }
@@ -570,9 +608,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val nextNote = if (activeNote == null) {
-            notesRepository.newNote(content)
+            notesRepository.newNote(trimmed, origin = origin)
         } else {
-            notesRepository.updateNote(activeNote, content)
+            notesRepository.updateNote(activeNote, trimmed)
         }
 
         val nextNotes = (state.savedNotes.filterNot { it.id == nextNote.id } + nextNote)
