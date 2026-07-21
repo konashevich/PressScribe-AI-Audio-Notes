@@ -47,7 +47,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
@@ -248,9 +248,10 @@ fun TranscriptionApp(
         }
     }
 
-    val openSavedNotes = {
+    val openSavedNotes: () -> Unit = {
         wideScreen = EditorScreen.NOTES
         uiScope.launch { pagerState.animateScrollToPage(1) }
+        Unit
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -1091,7 +1092,7 @@ private fun PolishedEditorPanel(
         },
         trailingControls = {
             ActionIconButton(
-                icon = Icons.Filled.KeyboardArrowLeft,
+                icon = Icons.Filled.KeyboardArrowRight,
                 contentDescription = "Open saved notes",
                 onClick = onOpenNotes,
             )
