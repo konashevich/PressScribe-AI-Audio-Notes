@@ -1,17 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Cross-platform PyInstaller recipe (Windows + Linux). Build on the target OS/arch:
+#   python -m PyInstaller PressScribe.spec
+# Produces an onedir layout under dist/PressScribe/ (folder + executable).
 
 
 a = Analysis(
-    ['transcriber.py'], # Or your main script name
-    pathex=['c:\\Users\\akona\\OneDrive\\Dev\\Smart Recorder Transcriber'], # Or the path to your project
+    ['transcriber.py'],
+    pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.')],  # <--- ADD THIS LINE (assuming icon.ico is in the same dir as transcriber.py)
-                                 # If icon.png, use ('icon.png', '.')
+    datas=[('icon.ico', '.')],
     hiddenimports=['notes_store', 'translate_languages'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Local ASR stack is UI-disabled (GEMINI_ONLY_UI); keep it out of the freeze.
+    excludes=['faster_whisper', 'numpy', 'ctranslate2'],
     noarchive=False,
     optimize=0,
 )
@@ -21,22 +24,28 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas, # This now includes your icon for runtime access
     [],
+    exclude_binaries=True,
     name='PressScribe',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False, # For --windowed
+    upx=False,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico'  # <--- ENSURE THIS IS PRESENT (path to your .ico file)
+    icon='icon.ico',
 )
 
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='PressScribe',
+)
