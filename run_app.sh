@@ -1,4 +1,3 @@
 #!/bin/bash
-cd /mnt/merged_ssd/PressScribe-AI-Audio-Notes
-source venv/bin/activate
-python transcriber.py
+cd "$(dirname "$0")"
+exec ./venv/bin/python transcriber.py
