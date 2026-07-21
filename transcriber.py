@@ -89,6 +89,10 @@ def load_env_file(env_path):
         return {}
     return env_values
 
+# When True, non-Gemini backends stay in the codebase but are hidden from UI
+# and never selected at runtime (desktop Gemini-only product surface).
+GEMINI_ONLY_UI = True
+
 # --- Default Settings ---
 DEFAULT_SETTINGS = {
     "api_key": "",
@@ -103,7 +107,7 @@ DEFAULT_SETTINGS = {
     "auto_save_notes": True,
     "listen_mode": "Click and Hold",
     "microphone_index": None, # None means default
-    "transcription_service": "Google", # "Google", "Local", or "Qwen 3 ASR Server"
+    "transcription_service": "Gemini", # "Gemini", "Google", "Local", or "Qwen 3 ASR Server"
     "whisper_model": "base", # "tiny", "base", "small", etc.
     "qwen_asr_url": default_qwen_asr_url(),
     "qwen_asr_timeout_seconds": 360,
@@ -120,6 +124,21 @@ class Communicate(QObject):
     import_finished = Signal()
     polish_finished = Signal()
     translate_finished = Signal()
+
+def safe_debug(message):
+    """Print debug text without crashing on Windows console encodings."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(str(message).encode("ascii", "replace").decode("ascii"))
+
+
+def safe_error_text(exc):
+    try:
+        return str(exc)
+    except Exception:
+        return repr(exc)
+
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -632,54 +651,55 @@ class MainWindow(QMainWindow):
 
         # Settings Menu
         settings_menu = menu_bar.addMenu("Settings")
-        
-        # --- Transcription Service Menu ---
-        trans_service_menu = settings_menu.addMenu("Transcription Service")
-        self.trans_service_group = QActionGroup(self)
-        google_trans_action = QAction("Google Speech (free)", self, checkable=True)
-        google_trans_action.setData("Google")
-        google_trans_action.setToolTip(
-            "Free Google speech recognition. Falls back to Gemini when an API key is configured."
-        )
-        google_trans_action.triggered.connect(lambda: self.set_transcription_service("Google"))
-        local_trans_action = QAction("Local (Faster-Whisper)", self, checkable=True)
-        local_trans_action.setData("Local")
-        local_trans_action.triggered.connect(lambda: self.set_transcription_service("Local"))
-        qwen_trans_action = QAction("Qwen 3 ASR Server", self, checkable=True)
-        qwen_trans_action.setData("Qwen 3 ASR Server")
-        qwen_trans_action.triggered.connect(lambda: self.set_transcription_service("Qwen 3 ASR Server"))
-        self.trans_service_group.addAction(google_trans_action)
-        self.trans_service_group.addAction(local_trans_action)
-        self.trans_service_group.addAction(qwen_trans_action)
-        trans_service_menu.addAction(google_trans_action)
-        trans_service_menu.addAction(local_trans_action)
-        trans_service_menu.addAction(qwen_trans_action)
 
-        trans_service_menu.addSeparator()
-        trans_service_menu.addAction("Set Qwen ASR Server URL...", self.set_qwen_asr_url)
-        trans_service_menu.addAction("Set Qwen ASR Timeout...", self.set_qwen_asr_timeout)
+        if not GEMINI_ONLY_UI:
+            # --- Transcription Service Menu ---
+            trans_service_menu = settings_menu.addMenu("Transcription Service")
+            self.trans_service_group = QActionGroup(self)
+            google_trans_action = QAction("Google Speech (free)", self, checkable=True)
+            google_trans_action.setData("Google")
+            google_trans_action.setToolTip(
+                "Free Google speech recognition. Falls back to Gemini when an API key is configured."
+            )
+            google_trans_action.triggered.connect(lambda: self.set_transcription_service("Google"))
+            local_trans_action = QAction("Local (Faster-Whisper)", self, checkable=True)
+            local_trans_action.setData("Local")
+            local_trans_action.triggered.connect(lambda: self.set_transcription_service("Local"))
+            qwen_trans_action = QAction("Qwen 3 ASR Server", self, checkable=True)
+            qwen_trans_action.setData("Qwen 3 ASR Server")
+            qwen_trans_action.triggered.connect(lambda: self.set_transcription_service("Qwen 3 ASR Server"))
+            self.trans_service_group.addAction(google_trans_action)
+            self.trans_service_group.addAction(local_trans_action)
+            self.trans_service_group.addAction(qwen_trans_action)
+            trans_service_menu.addAction(google_trans_action)
+            trans_service_menu.addAction(local_trans_action)
+            trans_service_menu.addAction(qwen_trans_action)
 
-        # --- Whisper Model Menu ---
-        whisper_model_menu = trans_service_menu.addMenu("Faster-Whisper Model")
-        self.whisper_model_group = QActionGroup(self)
-        for model_name in ["tiny", "base", "small", "medium"]:
-            action = QAction(model_name.capitalize(), self, checkable=True)
-            action.setData(model_name)
-            action.triggered.connect(lambda checked, m=model_name: self.set_whisper_model(m))
-            self.whisper_model_group.addAction(action)
-            whisper_model_menu.addAction(action)
+            trans_service_menu.addSeparator()
+            trans_service_menu.addAction("Set Qwen ASR Server URL...", self.set_qwen_asr_url)
+            trans_service_menu.addAction("Set Qwen ASR Timeout...", self.set_qwen_asr_timeout)
 
-        # --- AI Service Menu ---
-        ai_service_menu = settings_menu.addMenu("AI Service")
-        self.ai_service_group = QActionGroup(self)
-        gemini_action = QAction("Gemini", self, checkable=True)
-        gemini_action.triggered.connect(lambda: self.set_ai_service("Gemini"))
-        local_action = QAction("Local AI", self, checkable=True)
-        local_action.triggered.connect(lambda: self.set_ai_service("Local"))
-        self.ai_service_group.addAction(gemini_action)
-        self.ai_service_group.addAction(local_action)
-        ai_service_menu.addAction(gemini_action)
-        ai_service_menu.addAction(local_action)
+            # --- Whisper Model Menu ---
+            whisper_model_menu = trans_service_menu.addMenu("Faster-Whisper Model")
+            self.whisper_model_group = QActionGroup(self)
+            for model_name in ["tiny", "base", "small", "medium"]:
+                action = QAction(model_name.capitalize(), self, checkable=True)
+                action.setData(model_name)
+                action.triggered.connect(lambda checked, m=model_name: self.set_whisper_model(m))
+                self.whisper_model_group.addAction(action)
+                whisper_model_menu.addAction(action)
+
+            # --- AI Service Menu ---
+            ai_service_menu = settings_menu.addMenu("AI Service")
+            self.ai_service_group = QActionGroup(self)
+            gemini_action = QAction("Gemini", self, checkable=True)
+            gemini_action.triggered.connect(lambda: self.set_ai_service("Gemini"))
+            local_action = QAction("Local AI", self, checkable=True)
+            local_action.triggered.connect(lambda: self.set_ai_service("Local"))
+            self.ai_service_group.addAction(gemini_action)
+            self.ai_service_group.addAction(local_action)
+            ai_service_menu.addAction(gemini_action)
+            ai_service_menu.addAction(local_action)
         
         theme_menu = settings_menu.addMenu("Theme")
         dark_action = QAction("Dark", self, checkable=True)
@@ -779,7 +799,8 @@ class MainWindow(QMainWindow):
         settings_menu.addAction("Edit Translate Prompt...", self.edit_translate_prompt)
         settings_menu.addAction("Set Gemini API Key...", self.set_api_key)
         settings_menu.addAction("Set Gemini Model...", self.set_gemini_model)
-        settings_menu.addAction("Set Local AI URL...", self.set_local_model_url)
+        if not GEMINI_ONLY_UI:
+            settings_menu.addAction("Set Local AI URL...", self.set_local_model_url)
         
         # Help Menu
         help_menu = menu_bar.addMenu("Help")
@@ -924,7 +945,7 @@ class MainWindow(QMainWindow):
             self.auto_save_notes_action.setChecked(bool(self.settings.get("auto_save_notes", True)))
         self.update_translate_button_label()
         if hasattr(self, "translate_button") and not self._is_button_spinning("translate"):
-            self.translate_button.setEnabled(self.settings.get("ai_service", "Gemini") == "Gemini")
+            self.translate_button.setEnabled(self.get_effective_ai_service() == "Gemini")
         
         # Refresh ghost cursors after settings are applied and UI elements exist
         if hasattr(self, 'raw_text_area') and self.raw_text_area: # Ensure UI is initialized
@@ -948,7 +969,10 @@ class MainWindow(QMainWindow):
             timeout_seconds = DEFAULT_SETTINGS["qwen_asr_timeout_seconds"]
         self.settings["qwen_asr_timeout_seconds"] = timeout_seconds
 
-        if self.settings.get("transcription_service") == "Gemini":
+        if GEMINI_ONLY_UI:
+            self.settings["transcription_service"] = "Gemini"
+            self.settings["ai_service"] = "Gemini"
+        elif self.settings.get("transcription_service") == "Gemini":
             self.settings["transcription_service"] = "Google"
 
         self.settings["translate_language"] = normalize_translate_language_code(
@@ -1128,7 +1152,7 @@ class MainWindow(QMainWindow):
         self._stop_button_spinner("polish", "✨ Polish")
         self.update_translate_button_label()
         if hasattr(self, "translate_button") and not self._is_button_spinning("translate"):
-            self.translate_button.setEnabled(self.settings.get("ai_service", "Gemini") == "Gemini")
+            self.translate_button.setEnabled(self.get_effective_ai_service() == "Gemini")
 
     def start_translate_processing(self):
         if hasattr(self, "polish_button"):
@@ -1232,7 +1256,12 @@ class MainWindow(QMainWindow):
                 self.current_sample_width
             )
             
-            transcription_service = self.settings.get("transcription_service", "Google")
+            transcription_service = self.get_effective_transcription_service()
+            if transcription_service == "Gemini" and not self.settings.get("api_key"):
+                self.set_api_key()
+                if not self.settings.get("api_key"):
+                    self.audio_frames = []
+                    return
             self.start_record_processing()
             threading.Thread(
                 target=self.process_audio_with_fallbacks,
@@ -1250,7 +1279,19 @@ class MainWindow(QMainWindow):
 
         self.audio_frames = [] # Clear for next recording session
 
+    def get_effective_transcription_service(self):
+        if GEMINI_ONLY_UI:
+            return "Gemini"
+        return self.settings.get("transcription_service", DEFAULT_SETTINGS["transcription_service"])
+
+    def get_effective_ai_service(self):
+        if GEMINI_ONLY_UI:
+            return "Gemini"
+        return self.settings.get("ai_service", "Gemini")
+
     def get_transcription_fallback_order(self, primary_service):
+        if GEMINI_ONLY_UI:
+            return ["Gemini"]
         selectable_services = {"Google", "Local", "Qwen 3 ASR Server"}
         if primary_service == "Gemini":
             primary_service = "Google"
@@ -1276,14 +1317,14 @@ class MainWindow(QMainWindow):
     def _preload_heavy_deps_async(self):
         """Load slow optional deps in the background after the UI is shown."""
         def preload():
-            service = self.settings.get("transcription_service", DEFAULT_SETTINGS["transcription_service"])
-            ai_service = self.settings.get("ai_service", DEFAULT_SETTINGS["ai_service"])
+            service = self.get_effective_transcription_service()
+            ai_service = self.get_effective_ai_service()
             if service == "Gemini" or ai_service == "Gemini":
                 get_genai()
-            if service == "Local":
+            if not GEMINI_ONLY_UI and service == "Local":
                 get_numpy()
                 get_whisper_model_cls()
-            if service == "Qwen 3 ASR Server" or ai_service == "Local":
+            if not GEMINI_ONLY_UI and (service == "Qwen 3 ASR Server" or ai_service == "Local"):
                 import requests  # noqa: F401
         threading.Thread(target=preload, daemon=True).start()
 
@@ -1405,8 +1446,8 @@ class MainWindow(QMainWindow):
                     self.comm.text_ready.emit(text + " ")
                     return
                 except Exception as e:
-                    print(f"DEBUG: {service_name} transcription attempt failed: {e}")
-                    failures.append(f"{service_name}: {e}")
+                    safe_debug(f"DEBUG: {service_name} transcription attempt failed: {safe_error_text(e)}")
+                    failures.append(f"{service_name}: {safe_error_text(e)}")
 
             self.comm.error.emit("All transcription attempts failed:\n" + "\n".join(failures))
         finally:
@@ -1467,7 +1508,7 @@ class MainWindow(QMainWindow):
         if self._is_text_ai_busy():
             return
 
-        if self.settings.get("ai_service") == "Gemini" and not self.settings.get("api_key"):
+        if self.get_effective_ai_service() == "Gemini" and not self.settings.get("api_key"):
             self.set_api_key()
             if not self.settings.get("api_key"):
                 return
@@ -1485,7 +1526,7 @@ class MainWindow(QMainWindow):
 
     def get_polished_text(self, text):
         try:
-            service = self.settings.get("ai_service", "Gemini")
+            service = self.get_effective_ai_service()
             polished_text = ""
 
             if service == "Gemini":
@@ -1525,7 +1566,7 @@ class MainWindow(QMainWindow):
             self.comm.status.emit("Polished text added.")
 
         except Exception as e:
-            self.comm.error.emit(f"Failed to polish text: {e}")
+            self.comm.error.emit(f"Failed to polish text: {safe_error_text(e)}")
         finally:
             self.comm.polish_finished.emit()
 
@@ -1631,7 +1672,7 @@ class MainWindow(QMainWindow):
         if self._is_text_ai_busy():
             return
 
-        if self.settings.get("ai_service") != "Gemini":
+        if self.get_effective_ai_service() != "Gemini":
             self.show_status_message("Translate requires Gemini. Switch AI Service to Gemini.")
             return
 
@@ -2222,7 +2263,13 @@ class MainWindow(QMainWindow):
 
         self.start_import_processing()
         path = self.imported_audio_path
-        primary = self.settings.get("transcription_service", "Google")
+        primary = self.get_effective_transcription_service()
+        if primary == "Gemini" and not self.settings.get("api_key"):
+            self.finish_import_processing()
+            self.set_api_key()
+            if not self.settings.get("api_key"):
+                return
+            self.start_import_processing()
         threading.Thread(
             target=self.process_imported_audio_file,
             args=(path, primary),
@@ -2246,7 +2293,7 @@ class MainWindow(QMainWindow):
                     self.comm.status.emit("Transcription added to Raw Transcription.")
                     return
                 except Exception as e:
-                    failures.append(f"{service_name}: {e}")
+                    failures.append(f"{service_name}: {safe_error_text(e)}")
             self.comm.error.emit("All transcription attempts failed:\n" + "\n".join(failures))
         finally:
             self.comm.import_finished.emit()
@@ -2458,16 +2505,16 @@ class MainWindow(QMainWindow):
 def check_dependencies():
     """Checks for necessary system dependencies (flac and xclip)."""
     missing = []
-    
-    # Check for FLAC (required for SpeechRecognition to work consistently)
-    if not shutil.which("flac"):
+
+    # FLAC is typically installed via apt on Linux; skip the nag on Windows.
+    if not sys.platform.startswith("win") and not shutil.which("flac"):
         missing.append("flac")
-        
+
     # Check for xclip or xsel (required for pyperclip on Linux)
     if sys.platform.startswith("linux"):
         if not shutil.which("xclip") and not shutil.which("xsel"):
             missing.append("xclip (or xsel)")
-            
+
     if missing:
         msg = (
             "The following system dependencies are missing and are required for the app to function correctly:\n\n"
@@ -2476,7 +2523,7 @@ def check_dependencies():
             "Example for Ubuntu/Debian:\n"
             f"sudo apt-get install {' '.join([m.split()[0] for m in missing])}"
         )
-        # We need a dummy app to show the message box if one doesn't exist yet, 
+        # We need a dummy app to show the message box if one doesn't exist yet,
         # but since we call this after QApplication creation, we are good.
         QMessageBox.warning(None, "Missing Dependencies", msg)
 
