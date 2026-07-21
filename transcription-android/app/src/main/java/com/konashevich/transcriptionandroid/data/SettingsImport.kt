@@ -50,7 +50,7 @@ fun parseDesktopSettingsImport(content: String): SettingsImportPatch {
         volumeButtonMode = root.optImportedString("volume_button_mode")?.toVolumeButtonMode(),
         transcriptionService = root.optImportedString("transcription_service")?.toTranscriptionService(),
         geminiApiKey = root.optImportedString("api_key"),
-        geminiModel = root.optImportedString("gemini_model")?.ifBlank { DEFAULT_GEMINI_MODEL },
+        geminiModel = root.optImportedString("gemini_model")?.let(::normalizeGeminiModel),
         polishPrompt = root.optImportedString("system_prompt"),
         serverScheme = importedAsrUrl?.scheme,
         serverHost = importedAsrUrl?.host,

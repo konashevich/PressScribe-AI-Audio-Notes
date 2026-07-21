@@ -12,6 +12,9 @@ const val DEFAULT_POLISH_PROMPT =
 const val DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
 const val DEFAULT_VIBRATION_DURATION_MS = 20
 
+fun normalizeGeminiModel(value: String): String =
+    value.trim().ifBlank { DEFAULT_GEMINI_MODEL }
+
 enum class ThemeMode(val label: String) {
     AUTO("Auto"),
     LIGHT("Light"),
@@ -61,6 +64,8 @@ data class AppSettings(
     val vibrationDurationMs: Int = DEFAULT_VIBRATION_DURATION_MS,
     val autoSaveNotes: Boolean = true,
 ) {
+    fun resolvedGeminiModel(): String = normalizeGeminiModel(geminiModel)
+
     fun selfHostedUrl(): String? {
         val host = serverHost.trim()
         if (host.isEmpty()) {

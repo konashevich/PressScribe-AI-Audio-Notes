@@ -21,8 +21,8 @@ class SettingsRepository(private val context: Context) {
             volumeButtonMode = prefs[Keys.VOLUME_BUTTON_MODE].toEnumOrDefault(VolumeButtonMode.HOLD_ANY),
             transcriptionService = prefs[Keys.TRANSCRIPTION_SERVICE]
                 .toEnumOrDefault(TranscriptionService.GEMINI),
-            geminiApiKey = prefs[Keys.GEMINI_API_KEY].orEmpty(),
-            geminiModel = prefs[Keys.GEMINI_MODEL].orEmpty().ifBlank { DEFAULT_GEMINI_MODEL },
+            geminiApiKey = prefs[Keys.GEMINI_API_KEY].orEmpty().trim(),
+            geminiModel = normalizeGeminiModel(prefs[Keys.GEMINI_MODEL].orEmpty()),
             polishPrompt = prefs[Keys.POLISH_PROMPT].orEmpty().ifBlank { DEFAULT_POLISH_PROMPT },
             serverScheme = prefs[Keys.SERVER_SCHEME].toEnumOrDefault(ServerScheme.HTTP),
             serverHost = prefs[Keys.SERVER_HOST].orEmpty(),
@@ -46,9 +46,10 @@ class SettingsRepository(private val context: Context) {
     suspend fun updateTranscriptionService(value: TranscriptionService) =
         editString(Keys.TRANSCRIPTION_SERVICE, value.name)
 
-    suspend fun updateGeminiApiKey(value: String) = editString(Keys.GEMINI_API_KEY, value)
+    suspend fun updateGeminiApiKey(value: String) = editString(Keys.GEMINI_API_KEY, value.trim())
 
-    suspend fun updateGeminiModel(value: String) = editString(Keys.GEMINI_MODEL, value)
+    suspend fun updateGeminiModel(value: String) =
+        editString(Keys.GEMINI_MODEL, normalizeGeminiModel(value))
 
     suspend fun updatePolishPrompt(value: String) = editString(Keys.POLISH_PROMPT, value)
 
@@ -85,8 +86,8 @@ class SettingsRepository(private val context: Context) {
             patch.listenMode?.let { prefs[Keys.LISTEN_MODE] = it.name }
             patch.volumeButtonMode?.let { prefs[Keys.VOLUME_BUTTON_MODE] = it.name }
             patch.transcriptionService?.let { prefs[Keys.TRANSCRIPTION_SERVICE] = it.name }
-            patch.geminiApiKey?.let { prefs[Keys.GEMINI_API_KEY] = it }
-            patch.geminiModel?.let { prefs[Keys.GEMINI_MODEL] = it.ifBlank { DEFAULT_GEMINI_MODEL } }
+            patch.geminiApiKey?.let { prefs[Keys.GEMINI_API_KEY] = it.trim() }
+            patch.geminiModel?.let { prefs[Keys.GEMINI_MODEL] = normalizeGeminiModel(it) }
             patch.polishPrompt?.let { prefs[Keys.POLISH_PROMPT] = it }
             patch.serverScheme?.let { prefs[Keys.SERVER_SCHEME] = it.name }
             patch.serverHost?.let { prefs[Keys.SERVER_HOST] = it }

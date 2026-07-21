@@ -35,6 +35,7 @@ class GeminiApiClient(
         if (apiKey.isEmpty()) {
             throw IllegalStateException("Gemini API key is not configured.")
         }
+        val model = settings.resolvedGeminiModel()
 
         val uploadedFile = uploadFile(file, mimeType, apiKey)
         try {
@@ -64,7 +65,7 @@ class GeminiApiClient(
                 )
 
             val request = Request.Builder()
-                .url("https://generativelanguage.googleapis.com/v1beta/models/${settings.geminiModel}:generateContent")
+                .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
                 .header("x-goog-api-key", apiKey)
                 .header("Content-Type", jsonMediaType.toString())
                 .post(payload.toString().toRequestBody(jsonMediaType))
@@ -85,6 +86,7 @@ class GeminiApiClient(
         if (apiKey.isEmpty()) {
             throw IllegalStateException("Gemini API key is not configured.")
         }
+        val model = settings.resolvedGeminiModel()
 
         val payload = JSONObject()
             .put(
@@ -111,7 +113,7 @@ class GeminiApiClient(
             )
 
         val request = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/${settings.geminiModel}:generateContent")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
             .header("x-goog-api-key", apiKey)
             .header("Content-Type", jsonMediaType.toString())
             .post(payload.toString().toRequestBody(jsonMediaType))
