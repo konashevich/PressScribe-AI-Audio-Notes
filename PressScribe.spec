@@ -7,7 +7,7 @@ a = Analysis(
     binaries=[],
     datas=[('icon.ico', '.')],  # <--- ADD THIS LINE (assuming icon.ico is in the same dir as transcriber.py)
                                  # If icon.png, use ('icon.png', '.')
-    hiddenimports=[],
+    hiddenimports=['notes_store', 'translate_languages'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

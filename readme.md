@@ -19,14 +19,17 @@ How to get key (I still highly recommend to watch that youtube video above):
 ## **Tech stuff (don't read it you are not a nerd)**
 
 - **Interactive Transcription**: Use your microphone to transcribe speech directly into the editor at the cursor's position. Select text to replace it with a new transcription.
+- **Open Audio**: Import an audio file (WAV, MP3, M4A, and more) and transcribe it with your selected transcription service.
 - **AI-Powered Polishing**: Polish the entire text or just a selection using an AI (Gemini or a local model) to correct grammar, improve phrasing, and fix typos.
-- **Modern Theming**: Choose between beautiful, consistent light and dark themes (e.g., Litera, Cyborg, Darkly) powered by the ttkbootstrap library.
+- **Polish + Translate**: Proofread and translate raw text into a chosen language with Gemini (Settings → Choose Translate Language).
+- **Saved Notes**: Auto-save polished text into a notes library (on by default). Switch to **Saved Notes** to open, edit, copy, or delete notes. Manual Save buttons work on both raw and polished panels.
+- **Modern Theming**: Choose between beautiful, consistent light and dark themes.
 - **Flexible AI Options**: Easily switch between Google's Gemini API and a local AI model running on your machine (e.g., via LM Studio).
 - **Multiple Transcription Engines**: Choose between Google Speech Recognition, local Faster-Whisper, or a Qwen 3 ASR server running on your LAN.
 - **Session Management**:
     - **Save & New**: Save your current transcription and the polished text to a JSON file and clear the editors for a new session.
     - **Open**: Load a previously saved session to continue your work.
-- **Persistent Settings**: Your API key, AI service preference, and theme choice are saved automatically between sessions.
+- **Persistent Settings**: Your API key, AI service preference, theme choice, translate language, and autosave preference are saved automatically between sessions.
 
 ## **Setup and Installation**
 
