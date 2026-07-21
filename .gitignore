@@ -30,3 +30,6 @@ settings.json
 # Saved transcription sessions
 savings/
 /dist/savings
+
+# IDE / Cursor
+.specstory/
