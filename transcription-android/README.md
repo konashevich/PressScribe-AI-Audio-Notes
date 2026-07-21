@@ -26,13 +26,31 @@ That matches the requested Android scope: Google/Gemini plus self-hosted IP/port
 From this folder:
 
 ```powershell
-$env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
+$env:JAVA_HOME='C:\Program Files\Java\jdk-17'
 .\gradlew.bat :app:assembleDebug
 ```
 
 Debug APK output:
 
 `app\build\outputs\apk\debug\app-debug.apk`
+
+Release APK (sideload / GitHub):
+
+```powershell
+.\gradlew.bat :app:assembleRelease
+```
+
+Output: `app\build\outputs\apk\release\app-release.apk`
+
+### Upload to GitHub Releases
+
+```powershell
+.\scripts\upload-github-apk.ps1 -Tag android-v1.2.0 -Title "Your title"
+```
+
+Or ask the Cursor agent: `/release-apk` (uses `.cursor/skills/upload-android-apk`).
+
+CI: GitHub Actions workflow **Android Release APK** (`workflow_dispatch` or push tag `android-v*`).
 
 ## Share flow
 

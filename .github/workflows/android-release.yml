@@ -1,0 +1,83 @@
+name: Android Release APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (created if missing)
+        required: true
+        type: string
+      title:
+        description: Release title
+        required: true
+        type: string
+      notes:
+        description: Optional release notes (empty = generate from commits)
+        required: false
+        type: string
+        default: ""
+  push:
+    tags:
+      - "android-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build release APK
+        working-directory: transcription-android
+        run: ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Stage asset
+        working-directory: transcription-android
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk \
+             app/build/outputs/apk/release/PressScribe-release.apk
+
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "title=${{ inputs.title }}" >> "$GITHUB_OUTPUT"
+            echo "notes=${{ inputs.notes }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "title=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "notes=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          TITLE="${{ steps.meta.outputs.title }}"
+          NOTES="${{ steps.meta.outputs.notes }}"
+          APK="transcription-android/app/build/outputs/apk/release/PressScribe-release.apk"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            if [ -n "$NOTES" ]; then
+              gh release create "$TAG" "$APK" --title "$TITLE" --notes "$NOTES"
+            else
+              gh release create "$TAG" "$APK" --title "$TITLE" --generate-notes
+            fi
+          fi
+          gh release view "$TAG" --json url -q .url
