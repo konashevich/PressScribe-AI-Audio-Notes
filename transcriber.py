@@ -15,9 +15,9 @@ from PySide6.QtWidgets import (
     QTextEdit, QPushButton, QSplitter, QFileDialog,
     QMessageBox, QInputDialog, QLabel, QDialog, QDialogButtonBox,
     QStackedWidget, QListWidget, QListWidgetItem, QAbstractItemView,
-    QFrame, QMenu,
+    QFrame, QMenu, QSizePolicy,
 )
-from PySide6.QtCore import Qt, Signal, QObject, QEvent, QTimer
+from PySide6.QtCore import Qt, Signal, QObject, QEvent, QTimer, QSize
 from PySide6.QtGui import QAction, QFont, QActionGroup, QIcon, QColor, QTextCharFormat, QTextCursor, QTextOption
 
 # --- Core Logic Imports ---
@@ -388,6 +388,17 @@ class RecordButton(QPushButton):
             self.released.emit()
         super().mouseReleaseEvent(event)
 
+
+class EditorSplitPane(QWidget):
+    """Splitter child with equal preferred size; ignores toolbar-driven min widths."""
+
+    def sizeHint(self):
+        return QSize(400, 400)
+
+    def minimumSizeHint(self):
+        return QSize(0, 0)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -514,7 +525,7 @@ class MainWindow(QMainWindow):
         editor_layout.addWidget(splitter)
 
         # Raw Transcription Panel
-        raw_panel = QWidget()
+        raw_panel = EditorSplitPane()
         raw_layout = QVBoxLayout(raw_panel)
         raw_layout.addWidget(QLabel("Raw Transcription"))
         self.raw_text_area = QTextEdit()
@@ -522,6 +533,7 @@ class MainWindow(QMainWindow):
         raw_layout.addWidget(self.raw_text_area)
 
         raw_buttons_layout = QHBoxLayout()
+        raw_buttons_layout.setSpacing(4)
         self.record_button = RecordButton("🔴 Listen")
         self.record_button.pressed.connect(self.start_recording)
         self.record_button.released.connect(self.stop_recording)
@@ -536,16 +548,20 @@ class MainWindow(QMainWindow):
         self.save_raw_note_button.clicked.connect(self.manual_save_raw_note)
         self.delete_raw_button = QPushButton("🗑️ Clear")
         self.delete_raw_button.clicked.connect(self.clear_raw_text_area_content)
-        raw_buttons_layout.addWidget(self.record_button)
-        raw_buttons_layout.addWidget(self.polish_button)
-        raw_buttons_layout.addWidget(self.translate_button)
-        raw_buttons_layout.addWidget(self.copy_raw_button)
-        raw_buttons_layout.addWidget(self.save_raw_note_button)
-        raw_buttons_layout.addWidget(self.delete_raw_button)
+        for button in (
+            self.record_button,
+            self.polish_button,
+            self.translate_button,
+            self.copy_raw_button,
+            self.save_raw_note_button,
+            self.delete_raw_button,
+        ):
+            self._configure_editor_toolbar_button(button)
+            raw_buttons_layout.addWidget(button)
         raw_layout.addLayout(raw_buttons_layout)
 
         # Polished Text Panel
-        polished_panel = QWidget()
+        polished_panel = EditorSplitPane()
         polished_layout = QVBoxLayout(polished_panel)
         polished_layout.addWidget(QLabel("Polished Text"))
         self.polished_text_area = QTextEdit()
@@ -553,6 +569,7 @@ class MainWindow(QMainWindow):
         polished_layout.addWidget(self.polished_text_area)
 
         polished_buttons_layout = QHBoxLayout()
+        polished_buttons_layout.setSpacing(4)
         self.copy_polished_button = QPushButton("📋 Copy")
         self.copy_polished_button.clicked.connect(lambda: pyperclip.copy(self.polished_text_area.toPlainText()))
         self.save_polished_note_button = QPushButton("💾 Save")
@@ -561,15 +578,29 @@ class MainWindow(QMainWindow):
         self.delete_polished_button.clicked.connect(self.clear_polished_text_area_content)
         self.delete_all_button = QPushButton("🗑️ Clear All")
         self.delete_all_button.clicked.connect(self.clear_all_text)
-        polished_buttons_layout.addWidget(self.copy_polished_button)
-        polished_buttons_layout.addWidget(self.save_polished_note_button)
-        polished_buttons_layout.addWidget(self.delete_polished_button)
-        polished_buttons_layout.addWidget(self.delete_all_button)
+        for button in (
+            self.copy_polished_button,
+            self.save_polished_note_button,
+            self.delete_polished_button,
+            self.delete_all_button,
+        ):
+            self._configure_editor_toolbar_button(button)
+            polished_buttons_layout.addWidget(button)
         polished_layout.addLayout(polished_buttons_layout)
 
+        # Equal columns: left toolbar is wider, so override pane size hints (EditorSplitPane)
+        # and force a 50/50 split after the window is shown.
+        for panel in (raw_panel, polished_panel):
+            panel.setMinimumWidth(0)
+            panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         splitter.addWidget(raw_panel)
         splitter.addWidget(polished_panel)
-        splitter.setSizes([1000, 1000])
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([1, 1])
+        self.editor_splitter = splitter
+        self._editor_splitter_balanced = False
         self.main_stack.addWidget(editor_page)
 
         # --- Saved Notes page ---
@@ -841,6 +872,29 @@ class MainWindow(QMainWindow):
         self.apply_settings()
         # Reset whisper model to force reload
         self.whisper_model = None
+
+    def _configure_editor_toolbar_button(self, button):
+        """Let editor toolbars shrink so they cannot force an unequal splitter ratio."""
+        button.setMinimumWidth(0)
+        button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+    def _balance_editor_splitter(self):
+        """Force a 50/50 Raw vs Polished split after the first real layout pass."""
+        splitter = getattr(self, "editor_splitter", None)
+        if splitter is None:
+            return
+        total = sum(splitter.sizes())
+        if total <= 0:
+            QTimer.singleShot(50, self._balance_editor_splitter)
+            return
+        half = total // 2
+        splitter.setSizes([half, total - half])
+        self._editor_splitter_balanced = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_editor_splitter_balanced", False):
+            QTimer.singleShot(0, self._balance_editor_splitter)
 
     def set_theme(self, theme_name):
         self.settings["theme"] = theme_name
