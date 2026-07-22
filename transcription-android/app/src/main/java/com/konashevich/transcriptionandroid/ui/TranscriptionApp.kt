@@ -320,7 +320,6 @@ fun TranscriptionApp(
                             )
                             DropdownMenuItem(
                                 text = { Text("Open Audio") },
-                                enabled = !state.isTranscribing && !state.isImportingAudio,
                                 onClick = {
                                     menuExpanded = false
                                     openAudioLauncher.launch(arrayOf("audio/*"))
@@ -355,23 +354,25 @@ fun TranscriptionApp(
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        state.importedAudio?.let { importedAudio ->
-                            ImportedAudioCard(
-                                importedAudio = importedAudio,
-                                expanded = importedExpanded,
-                                isBusy = state.isTranscribing || state.isImportingAudio,
-                                onExpandedChange = { importedExpanded = it },
-                                onTranscribe = viewModel::transcribeImportedAudio,
-                                onSave = {
-                                    saveImportedAudioLauncher.launch(
-                                        CreateDocumentRequest(
-                                            mimeType = importedAudio.mimeType,
-                                            displayName = importedAudio.displayName,
-                                        ),
-                                    )
-                                },
-                                onClear = viewModel::clearImportedAudio,
-                            )
+                        if (!state.isRecording) {
+                            state.importedAudio?.let { importedAudio ->
+                                ImportedAudioCard(
+                                    importedAudio = importedAudio,
+                                    expanded = importedExpanded,
+                                    isBusy = state.isTranscribing || state.isImportingAudio,
+                                    onExpandedChange = { importedExpanded = it },
+                                    onTranscribe = viewModel::transcribeImportedAudio,
+                                    onSave = {
+                                        saveImportedAudioLauncher.launch(
+                                            CreateDocumentRequest(
+                                                mimeType = importedAudio.mimeType,
+                                                displayName = importedAudio.displayName,
+                                            ),
+                                        )
+                                    },
+                                    onClear = viewModel::clearImportedAudio,
+                                )
+                            }
                         }
 
                         if (wideLayout) {
@@ -1079,11 +1080,13 @@ private fun RawEditorPanel(
                 icon = Icons.Filled.AutoFixHigh,
                 contentDescription = "Polish text",
                 isBusy = state.isPolishing,
+                enabled = !state.isTranslating,
                 onClick = viewModel::polishText,
             )
             TranslateActionButton(
                 languageCode = state.settings.translateLanguageCode,
-                isBusy = state.isPolishing,
+                isBusy = state.isTranslating,
+                enabled = !state.isPolishing,
                 onClick = {
                     if (!isConfiguredTranslateLanguage(state.settings.translateLanguageCode)) {
                         onRequestTranslateLanguage()
@@ -1248,14 +1251,16 @@ private fun ListenControls(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
+    val canStartListen = !state.isImportingAudio && !state.isTranscribing
 
     LaunchedEffect(
         isPressed,
         state.settings.listenMode,
         hasRecordPermission,
+        state.isImportingAudio,
         state.isTranscribing,
     ) {
-        if (state.settings.listenMode == ListenMode.HOLD && hasRecordPermission && !state.isTranscribing) {
+        if (state.settings.listenMode == ListenMode.HOLD && hasRecordPermission && canStartListen) {
             if (isPressed) {
                 onStartRecording()
             } else {
@@ -1271,13 +1276,13 @@ private fun ListenControls(
                 !hasRecordPermission -> onRequestPermission()
             }
         },
-        enabled = !state.isTranscribing,
+        enabled = state.isRecording || canStartListen,
         interactionSource = interactionSource,
         contentPadding = PaddingValues(0.dp),
         modifier = Modifier.size(44.dp),
     ) {
         when {
-            state.isTranscribing -> {
+            state.isTranscribing || state.isImportingAudio -> {
                 CircularProgressIndicator(
                     modifier = Modifier.size(18.dp),
                     strokeWidth = 2.dp,
@@ -1329,11 +1334,12 @@ private fun TranslateActionButton(
     languageCode: String,
     isBusy: Boolean,
     onClick: () -> Unit,
+    enabled: Boolean = true,
 ) {
     val language = findTranslateLanguage(languageCode)
     OutlinedButton(
         onClick = onClick,
-        enabled = !isBusy,
+        enabled = enabled && !isBusy,
         contentPadding = PaddingValues(0.dp),
         modifier = Modifier.size(40.dp),
     ) {
@@ -1472,6 +1478,7 @@ private fun ImportedAudioCard(
                     ActionIconButton(
                         icon = Icons.Filled.Save,
                         contentDescription = "Save imported audio",
+                        enabled = !isBusy,
                         onClick = onSave,
                     )
                 }
