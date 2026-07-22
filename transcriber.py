@@ -403,7 +403,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PressScribe")
-        self.setGeometry(100, 100, 900, 600)
+        self.setGeometry(100, 100, 1080, 720)
 
         # --- Set Window Icon ---
         # Make sure 'icon.ico' or 'icon.png' is in the same directory as your script,
