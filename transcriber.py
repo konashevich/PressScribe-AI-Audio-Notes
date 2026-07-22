@@ -15,10 +15,14 @@ from PySide6.QtWidgets import (
     QTextEdit, QPushButton, QSplitter, QFileDialog,
     QMessageBox, QInputDialog, QLabel, QDialog, QDialogButtonBox,
     QStackedWidget, QListWidget, QListWidgetItem, QAbstractItemView,
-    QFrame, QMenu, QSizePolicy,
+    QFrame, QMenu, QSizePolicy, QRadioButton, QButtonGroup, QLineEdit,
+    QScrollArea, QCheckBox,
 )
-from PySide6.QtCore import Qt, Signal, QObject, QEvent, QTimer, QSize
-from PySide6.QtGui import QAction, QFont, QActionGroup, QIcon, QColor, QTextCharFormat, QTextCursor, QTextOption
+from PySide6.QtCore import Qt, Signal, QObject, QEvent, QTimer, QSize, QUrl
+from PySide6.QtGui import (
+    QAction, QFont, QActionGroup, QIcon, QColor, QTextCharFormat, QTextCursor,
+    QTextOption, QDesktopServices,
+)
 
 # --- Core Logic Imports ---
 import speech_recognition as sr
@@ -105,13 +109,17 @@ DEFAULT_SETTINGS = {
     "translate_system_prompt": DEFAULT_TRANSLATE_POLISH_PROMPT,
     "translate_language": "",
     "auto_save_notes": True,
-    "listen_mode": "Click and Hold",
+    "listen_mode": None,  # Must be chosen in welcome or Settings
     "microphone_index": None, # None means default
     "transcription_service": "Gemini", # "Gemini", "Google", "Local", or "Qwen 3 ASR Server"
     "whisper_model": "base", # "tiny", "base", "small", etc.
     "qwen_asr_url": default_qwen_asr_url(),
     "qwen_asr_timeout_seconds": 360,
+    # First-run welcome must be completed before using the app.
+    "welcome_completed": False,
 }
+
+GEMINI_API_KEYS_URL = "https://aistudio.google.com/api-keys"
 
 # --- Communication signals for thread-safe UI updates ---
 class Communicate(QObject):
@@ -161,6 +169,48 @@ def resource_path(relative_path):
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
+
+
+VALID_LISTEN_MODES = ("Click and Hold", "Click and Stick")
+
+
+def app_config_dir():
+    """Stable per-user config directory (separate from source / install folder)."""
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "PressScribe")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/PressScribe")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(xdg, "PressScribe")
+
+
+def ensure_app_data_files():
+    """
+    Create the config dir and migrate legacy cwd settings/notes once if needed.
+    Returns (settings_path, notes_path).
+    """
+    config_dir = app_config_dir()
+    os.makedirs(config_dir, exist_ok=True)
+    settings_path = os.path.join(config_dir, "settings.json")
+    notes_path = os.path.join(config_dir, "saved_notes.json")
+
+    cwd_settings = os.path.abspath("settings.json")
+    cwd_notes = os.path.abspath("saved_notes.json")
+    if not os.path.exists(settings_path) and os.path.isfile(cwd_settings):
+        shutil.copy2(cwd_settings, settings_path)
+    if not os.path.exists(notes_path) and os.path.isfile(cwd_notes):
+        shutil.copy2(cwd_notes, notes_path)
+    return settings_path, notes_path
+
+
+def is_plausible_gemini_api_key(key):
+    text = (key or "").strip()
+    if len(text) < 20:
+        return False
+    if any(ch.isspace() for ch in text):
+        return False
+    return True
 
 
 # --- Modern Dark Theme Stylesheet (QSS) ---
@@ -219,6 +269,42 @@ QPushButton:pressed {
 QLabel {
     /* font-size: 10pt; Let specific labels or global app font handle this if needed */
     font-weight: bold;
+}
+QRadioButton {
+    color: #f0f0f0;
+    spacing: 8px;
+}
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #c8c8c8;
+    border-radius: 10px;
+    background-color: #1e1e1e;
+}
+QRadioButton::indicator:hover {
+    border-color: #ffffff;
+}
+QRadioButton::indicator:checked {
+    background-color: #0078d7;
+    border-color: #4da3ff;
+}
+QCheckBox {
+    color: #f0f0f0;
+    spacing: 8px;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #c8c8c8;
+    border-radius: 3px;
+    background-color: #1e1e1e;
+}
+QCheckBox::indicator:hover {
+    border-color: #ffffff;
+}
+QCheckBox::indicator:checked {
+    background-color: #0078d7;
+    border-color: #4da3ff;
 }
 QSplitter::handle {
     background-color: #3c3c3c;
@@ -313,6 +399,42 @@ QLabel {
     font-weight: bold;
     color: #000000;
 }
+QRadioButton {
+    color: #000000;
+    spacing: 8px;
+}
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #555555;
+    border-radius: 10px;
+    background-color: #ffffff;
+}
+QRadioButton::indicator:hover {
+    border-color: #0078d7;
+}
+QRadioButton::indicator:checked {
+    background-color: #0078d7;
+    border-color: #005a9e;
+}
+QCheckBox {
+    color: #000000;
+    spacing: 8px;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #555555;
+    border-radius: 3px;
+    background-color: #ffffff;
+}
+QCheckBox::indicator:hover {
+    border-color: #0078d7;
+}
+QCheckBox::indicator:checked {
+    background-color: #0078d7;
+    border-color: #005a9e;
+}
 QSplitter::handle {
     background-color: #c0c0c0; /* Gray splitter handle */
 }
@@ -399,6 +521,254 @@ class EditorSplitPane(QWidget):
         return QSize(0, 0)
 
 
+class WelcomeSetupDialog(QDialog):
+    """Blocking first-run setup: Gemini API key instructions + explicit Listen mode."""
+
+    def __init__(self, parent=None, existing_api_key="", theme="dark"):
+        super().__init__(parent)
+        self.setWindowTitle("Welcome to PressScribe")
+        self.setModal(True)
+        self.setMinimumWidth(580)
+        self._listen_mode = None
+        self._setup_completed = False
+        self._quit_requested = False
+        # Dialog has no parent; apply theme so radio/checkbox indicators stay visible.
+        self.setStyleSheet(DARK_STYLESHEET if theme == "dark" else LIGHT_STYLESHEET)
+
+        outer = QVBoxLayout(self)
+        outer.setSpacing(10)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setSpacing(12)
+
+        title = QLabel("Welcome to PressScribe")
+        title_font = QFont(title.font())
+        title_font.setPointSize(max(title_font.pointSize() + 4, 14))
+        title_font.setBold(True)
+        title.setFont(title_font)
+        layout.addWidget(title)
+
+        intro = QLabel(
+            "Before you start, set up Gemini transcription and choose how the Listen button works. "
+            "You cannot continue until you pick a Listen mode and enter a valid API key."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        api_heading = QLabel("1. Gemini API key")
+        api_heading_font = QFont(api_heading.font())
+        api_heading_font.setBold(True)
+        api_heading.setFont(api_heading_font)
+        layout.addWidget(api_heading)
+
+        api_help = QLabel(
+            "PressScribe uses Google Gemini to transcribe and polish audio. "
+            "Create or copy an API key from your Google account on the Google AI Studio API keys page, "
+            "then paste it below."
+        )
+        api_help.setWordWrap(True)
+        layout.addWidget(api_help)
+
+        link_row = QHBoxLayout()
+        open_keys_button = QPushButton("Open API keys page")
+        open_keys_button.clicked.connect(self._open_api_keys_page)
+        link_row.addWidget(open_keys_button)
+        link_label = QLabel(
+            f'<a href="{GEMINI_API_KEYS_URL}">{GEMINI_API_KEYS_URL}</a>'
+        )
+        link_label.setOpenExternalLinks(True)
+        link_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        link_row.addWidget(link_label, stretch=1)
+        layout.addLayout(link_row)
+
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_edit.setPlaceholderText("Paste your Gemini API key here")
+        if existing_api_key:
+            self.api_key_edit.setText(existing_api_key)
+        self.api_key_edit.textChanged.connect(self._update_continue_enabled)
+        layout.addWidget(self.api_key_edit)
+
+        key_tools = QHBoxLayout()
+        self.show_key_checkbox = QCheckBox("Show API key")
+        self.show_key_checkbox.toggled.connect(self._toggle_key_visibility)
+        key_tools.addWidget(self.show_key_checkbox)
+        test_key_button = QPushButton("Test key")
+        test_key_button.clicked.connect(self._test_api_key)
+        key_tools.addWidget(test_key_button)
+        key_tools.addStretch(1)
+        layout.addLayout(key_tools)
+
+        listen_heading = QLabel("2. Listen button mode (required)")
+        listen_heading_font = QFont(listen_heading.font())
+        listen_heading_font.setBold(True)
+        listen_heading.setFont(listen_heading_font)
+        layout.addWidget(listen_heading)
+
+        listen_intro = QLabel(
+            "Choose exactly one mode. Nothing is pre-selected — you must pick how recording should work."
+        )
+        listen_intro.setWordWrap(True)
+        layout.addWidget(listen_intro)
+
+        self.listen_group = QButtonGroup(self)
+        self.listen_group.setExclusive(True)
+
+        self.hold_radio = QRadioButton("Click and Hold")
+        hold_help = QLabel(
+            "Press and hold Listen to record. Release the button to stop recording and start transcription."
+        )
+        hold_help.setWordWrap(True)
+        hold_help.setStyleSheet("margin-left: 22px; margin-bottom: 8px;")
+
+        self.stick_radio = QRadioButton("Click and Stick")
+        stick_help = QLabel(
+            "Click Listen once to start recording (it stays on). Click Listen again to stop and transcribe."
+        )
+        stick_help.setWordWrap(True)
+        stick_help.setStyleSheet("margin-left: 22px; margin-bottom: 8px;")
+
+        self.listen_group.addButton(self.hold_radio)
+        self.listen_group.addButton(self.stick_radio)
+        self.hold_radio.toggled.connect(self._on_listen_toggled)
+        self.stick_radio.toggled.connect(self._on_listen_toggled)
+
+        layout.addWidget(self.hold_radio)
+        layout.addWidget(hold_help)
+        layout.addWidget(self.stick_radio)
+        layout.addWidget(stick_help)
+
+        # Ensure no mode is checked on first show.
+        self.hold_radio.setAutoExclusive(False)
+        self.stick_radio.setAutoExclusive(False)
+        self.hold_radio.setChecked(False)
+        self.stick_radio.setChecked(False)
+        self.hold_radio.setAutoExclusive(True)
+        self.stick_radio.setAutoExclusive(True)
+
+        layout.addStretch(1)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, stretch=1)
+
+        button_row = QHBoxLayout()
+        quit_button = QPushButton("Quit")
+        quit_button.clicked.connect(self._quit_app)
+        button_row.addWidget(quit_button)
+        button_row.addStretch(1)
+        self.continue_button = QPushButton("Continue")
+        self.continue_button.setDefault(True)
+        self.continue_button.setEnabled(False)
+        self.continue_button.clicked.connect(self._accept_setup)
+        button_row.addWidget(self.continue_button)
+        outer.addLayout(button_row)
+
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(min(640, available.width() - 40), min(720, int(available.height() * 0.85)))
+
+        self._update_continue_enabled()
+
+    def _open_api_keys_page(self):
+        QDesktopServices.openUrl(QUrl(GEMINI_API_KEYS_URL))
+
+    def _toggle_key_visibility(self, checked):
+        mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        self.api_key_edit.setEchoMode(mode)
+
+    def _on_listen_toggled(self, checked):
+        if not checked:
+            return
+        if self.hold_radio.isChecked():
+            self._listen_mode = "Click and Hold"
+        elif self.stick_radio.isChecked():
+            self._listen_mode = "Click and Stick"
+        self._update_continue_enabled()
+
+    def _update_continue_enabled(self):
+        has_key = is_plausible_gemini_api_key(self.api_key_edit.text())
+        has_mode = self._listen_mode in VALID_LISTEN_MODES
+        self.continue_button.setEnabled(has_key and has_mode)
+
+    def api_key(self):
+        return self.api_key_edit.text().strip()
+
+    def listen_mode(self):
+        return self._listen_mode
+
+    def quit_requested(self):
+        return self._quit_requested
+
+    def _test_api_key(self):
+        key = self.api_key()
+        if not is_plausible_gemini_api_key(key):
+            QMessageBox.warning(
+                self,
+                "API key",
+                "Enter a complete Gemini API key first (no spaces, at least 20 characters).",
+            )
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            genai = get_genai()
+            genai.configure(api_key=key)
+            models = list(genai.list_models())
+            if not models:
+                raise RuntimeError("No models were returned for this key.")
+            QMessageBox.information(self, "API key OK", "This Gemini API key works.")
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "API key test failed",
+                f"Could not verify this key with Google Gemini:\n\n{safe_error_text(exc)}",
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _accept_setup(self):
+        if not self.continue_button.isEnabled():
+            return
+        if not is_plausible_gemini_api_key(self.api_key()):
+            QMessageBox.warning(
+                self,
+                "API key",
+                "Enter a complete Gemini API key (no spaces, at least 20 characters).",
+            )
+            return
+        if self._listen_mode not in VALID_LISTEN_MODES:
+            QMessageBox.warning(self, "Listen mode", "Please choose Click and Hold or Click and Stick.")
+            return
+        self._setup_completed = True
+        self.accept()
+
+    def _quit_app(self):
+        self._quit_requested = True
+        self._setup_completed = True
+        self.reject()
+
+    def reject(self):
+        if self._setup_completed or self._quit_requested:
+            super().reject()
+            return
+        QMessageBox.information(
+            self,
+            "Setup required",
+            "Please choose a Listen mode, enter your Gemini API key, and click Continue.\n"
+            "Or click Quit to exit PressScribe.",
+        )
+
+    def closeEvent(self, event):
+        if self._setup_completed or self._quit_requested:
+            event.accept()
+            return
+        event.ignore()
+        self.reject()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -410,12 +780,9 @@ class MainWindow(QMainWindow):
         # or provide the full path to the icon file.
         self.setWindowIcon(QIcon(resource_path("icon.ico"))) # Or resource_path("icon.png")
 
-        self.settings_file = "settings.json"
+        self.settings_file, self.notes_file = ensure_app_data_files()
         self.env_file = ".env"
         self.savings_dir = "savings"
-        self.notes_file = os.path.join(os.path.dirname(os.path.abspath(self.settings_file)), "saved_notes.json")
-        if not os.path.isabs(self.notes_file):
-            self.notes_file = os.path.abspath("saved_notes.json")
         self.imports_dir = os.path.join(tempfile.gettempdir(), "pressscribe_imports")
         if not os.path.exists(self.savings_dir):
             os.makedirs(self.savings_dir)
@@ -907,9 +1274,11 @@ class MainWindow(QMainWindow):
         self.apply_settings()
 
     def set_listen_mode(self, mode_name):
+        if mode_name not in VALID_LISTEN_MODES:
+            return
         self.settings["listen_mode"] = mode_name
         self.save_settings()
-        self.apply_settings() # Re-apply to update button behavior and menu check
+        self.apply_settings()
 
     def set_microphone(self, index):
         self.settings["microphone_index"] = index
@@ -970,13 +1339,21 @@ class MainWindow(QMainWindow):
                 if len(self.ai_service_group.actions()) > 1: self.ai_service_group.actions()[1].setChecked(True)
         
         # Apply Listen Mode
-        listen_mode = self.settings.get("listen_mode", "Click and Hold")
+        listen_mode = self.settings.get("listen_mode")
+        if listen_mode not in VALID_LISTEN_MODES:
+            listen_mode = None
+            self.settings["listen_mode"] = None
         if hasattr(self, 'listen_mode_group') and self.listen_mode_group:
             actions = self.listen_mode_group.actions()
-            if listen_mode == "Click and Hold":
-                if actions and len(actions) > 0: actions[0].setChecked(True)
-            else: # "Click and Stick"
-                if actions and len(actions) > 1: actions[1].setChecked(True)
+            was_exclusive = self.listen_mode_group.isExclusive()
+            self.listen_mode_group.setExclusive(False)
+            for action in actions:
+                action.setChecked(False)
+            if listen_mode == "Click and Hold" and actions:
+                actions[0].setChecked(True)
+            elif listen_mode == "Click and Stick" and len(actions) > 1:
+                actions[1].setChecked(True)
+            self.listen_mode_group.setExclusive(was_exclusive)
         
         # Configure record_button behavior based on listen_mode
         if hasattr(self, 'record_button') and self.record_button:
@@ -1005,7 +1382,7 @@ class MainWindow(QMainWindow):
             if listen_mode == "Click and Hold":
                 self.record_button.pressed.connect(self.start_recording)
                 self.record_button.released.connect(self.stop_recording)
-            else:  # "Click and Stick"
+            elif listen_mode == "Click and Stick":
                 self.record_button.clicked.connect(self.toggle_recording_stick_mode)
 
         if hasattr(self, "auto_save_notes_action"):
@@ -1019,6 +1396,7 @@ class MainWindow(QMainWindow):
              QTimer.singleShot(0, self._refresh_all_ghost_cursors)
 
     def load_settings(self):
+        loaded_settings = None
         try:
             with open(self.settings_file, 'r') as f:
                 loaded_settings = json.load(f)
@@ -1050,6 +1428,33 @@ class MainWindow(QMainWindow):
         if not self.settings.get("translate_system_prompt"):
             self.settings["translate_system_prompt"] = DEFAULT_TRANSLATE_POLISH_PROMPT
         self.settings["auto_save_notes"] = bool(self.settings.get("auto_save_notes", True))
+        self.settings["welcome_completed"] = bool(self.settings.get("welcome_completed", False))
+        if self.settings.get("listen_mode") not in VALID_LISTEN_MODES:
+            self.settings["listen_mode"] = None
+
+    def ensure_welcome_setup(self):
+        """
+        Run first-run setup before the main window is shown.
+        Returns True if the app may continue, False if the user quit setup.
+        """
+        if self.settings.get("welcome_completed") and self.settings.get("listen_mode") in VALID_LISTEN_MODES:
+            return True
+        # Incomplete prior setup must be finished before use.
+        self.settings["welcome_completed"] = False
+        dialog = WelcomeSetupDialog(
+            None,
+            existing_api_key=self.settings.get("api_key", ""),
+            theme=self.settings.get("theme", "dark"),
+        )
+        result = dialog.exec()
+        if result != QDialog.DialogCode.Accepted or dialog.quit_requested():
+            return False
+        self.settings["api_key"] = dialog.api_key()
+        self.settings["listen_mode"] = dialog.listen_mode()
+        self.settings["welcome_completed"] = True
+        self.save_settings()
+        self.apply_settings()
+        return True
 
     def get_qwen_asr_url(self):
         env_url = self.env_settings.get("QWEN_ASR_SERVER_URL", "").strip()
@@ -1242,6 +1647,11 @@ class MainWindow(QMainWindow):
         return "🌐 Translate"
 
     def start_recording(self):
+        if self.settings.get("listen_mode") not in VALID_LISTEN_MODES:
+            self.show_error_message(
+                "Choose a Listen mode in Settings (Click and Hold or Click and Stick) before recording."
+            )
+            return
         if self.is_recording or self._is_button_spinning("record") or self.is_import_transcribing:
             if self.is_import_transcribing:
                 self.show_status_message("Wait for the imported audio transcription to finish.")
@@ -2604,5 +3014,7 @@ if __name__ == "__main__":
         app.setDesktopFileName("pressscribe.desktop")
     check_dependencies()
     window = MainWindow()
+    if not window.ensure_welcome_setup():
+        sys.exit(0)
     window.show()
     sys.exit(app.exec())
