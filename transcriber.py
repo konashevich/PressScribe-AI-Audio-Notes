@@ -21,12 +21,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject, QEvent, QTimer, QSize, QUrl
 from PySide6.QtGui import (
     QAction, QFont, QActionGroup, QIcon, QColor, QTextCharFormat, QTextCursor,
-    QTextOption, QDesktopServices,
+    QTextOption, QDesktopServices, QGuiApplication,
 )
 
 # --- Core Logic Imports ---
 import speech_recognition as sr
-import pyperclip
 
 from notes_store import (
     NotesStore,
@@ -132,6 +131,16 @@ class Communicate(QObject):
     import_finished = Signal()
     polish_finished = Signal()
     translate_finished = Signal()
+    microphone_ready = Signal(object, object)  # stop_handle, device_index
+    microphone_failed = Signal(str)
+
+def copy_text_to_clipboard(text):
+    """Copy via Qt clipboard. Avoid pyperclip on Linux — it can hang the UI thread."""
+    clipboard = QGuiApplication.clipboard()
+    if clipboard is None:
+        return
+    clipboard.setText(text or "")
+
 
 def safe_debug(message):
     """Print debug text without crashing on Windows console encodings."""
@@ -818,8 +827,11 @@ class MainWindow(QMainWindow):
         self.comm.import_finished.connect(self.finish_import_processing)
         self.comm.polish_finished.connect(self.finish_polish_processing)
         self.comm.translate_finished.connect(self.finish_translate_processing)
+        self.comm.microphone_ready.connect(self._on_microphone_ready)
+        self.comm.microphone_failed.connect(self._on_microphone_failed)
 
         self.is_recording = False
+        self._mic_start_generation = 0
         self.recognizer = sr.Recognizer()
         self.recognizer.energy_threshold = 4000
         self.recognizer.dynamic_energy_threshold = True
@@ -910,7 +922,7 @@ class MainWindow(QMainWindow):
         self.translate_button = QPushButton("🌐 Translate")
         self.translate_button.clicked.connect(self.polish_and_translate_text)
         self.copy_raw_button = QPushButton("📋 Copy")
-        self.copy_raw_button.clicked.connect(lambda: pyperclip.copy(self.raw_text_area.toPlainText()))
+        self.copy_raw_button.clicked.connect(lambda: copy_text_to_clipboard(self.raw_text_area.toPlainText()))
         self.save_raw_note_button = QPushButton("💾 Save")
         self.save_raw_note_button.clicked.connect(self.manual_save_raw_note)
         self.delete_raw_button = QPushButton("🗑️ Clear")
@@ -938,7 +950,7 @@ class MainWindow(QMainWindow):
         polished_buttons_layout = QHBoxLayout()
         polished_buttons_layout.setSpacing(4)
         self.copy_polished_button = QPushButton("📋 Copy")
-        self.copy_polished_button.clicked.connect(lambda: pyperclip.copy(self.polished_text_area.toPlainText()))
+        self.copy_polished_button.clicked.connect(lambda: copy_text_to_clipboard(self.polished_text_area.toPlainText()))
         self.save_polished_note_button = QPushButton("💾 Save")
         self.save_polished_note_button.clicked.connect(self.manual_save_polished_note)
         self.delete_polished_button = QPushButton("🗑️ Clear")
@@ -1657,48 +1669,81 @@ class MainWindow(QMainWindow):
                 self.show_status_message("Wait for the imported audio transcription to finish.")
             return
         self.is_recording = True
+        self._mic_start_generation += 1
+        generation = self._mic_start_generation
         self.record_button.setText("Listening...")
         
         self.audio_frames = [] # Clear previous frames
         self.current_sample_rate = None
         self.current_sample_width = None
 
-        print(f"DEBUG: Starting background listener for audio accumulation. Device Index Setting: {self.settings.get('microphone_index')}")
+        device_index = self.settings.get("microphone_index")
+        print(f"DEBUG: Starting background listener for audio accumulation. Device Index Setting: {device_index}")
+        threading.Thread(
+            target=self._start_microphone_worker,
+            args=(device_index, generation),
+            daemon=True,
+        ).start()
+
+    def _start_microphone_worker(self, device_index, generation):
+        """Open the mic and calibrate off the UI thread (ambient adjust blocks)."""
         try:
-            device_index = self.settings.get("microphone_index")
             if device_index is None:
-                # Try auto-detection as a fallback
                 device_index = self.get_best_microphone_index()
-                if device_index is not None:
-                    self.settings["microphone_index"] = device_index
-                    self.save_settings()
-                    print(f"DEBUG: Fallback auto-selected microphone index {device_index}")
-                else:
-                    self.show_error_message("No microphone selected. Please select one in Settings > Microphone.")
-                    self.is_recording = False
-                    self.record_button.setText("🔴 Listen")
-                    return
+            if device_index is None:
+                self.comm.microphone_failed.emit(
+                    "No microphone selected. Please select one in Settings > Microphone."
+                )
+                return
+            if generation != self._mic_start_generation or not self.is_recording:
+                return
 
             mic = sr.Microphone(device_index=device_index)
-
-            
             print("DEBUG: Adjusting for ambient noise...")
-            # Test microphone access
             with mic as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=1.0) # Increased from 0.2s for better calibration
-                print(f"DEBUG: Ambient noise adjustment done. Energy threshold: {self.recognizer.energy_threshold}")
-            
-            self.background_listen_stop_handle = self.recognizer.listen_in_background(
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.35)
+            print(
+                f"DEBUG: Ambient noise adjustment done. Energy threshold: {self.recognizer.energy_threshold}"
+            )
+            if generation != self._mic_start_generation or not self.is_recording:
+                return
+
+            handle = self.recognizer.listen_in_background(
                 mic,
                 self.audio_accumulation_callback,
-                phrase_time_limit=None # Listen indefinitely until stopped explicitly
+                phrase_time_limit=None,
             )
+            if generation != self._mic_start_generation or not self.is_recording:
+                try:
+                    handle(wait_for_stop=False)
+                except Exception:
+                    pass
+                return
             print("DEBUG: Background listener started successfully.")
+            self.comm.microphone_ready.emit(handle, device_index)
         except Exception as e:
             print(f"DEBUG: Exception starting microphone: {e}")
-            self.show_error_message(f"Error starting microphone: {e}")
-            self.is_recording = False
-            self.record_button.setText("🔴 Listen")
+            self.comm.microphone_failed.emit(f"Error starting microphone: {e}")
+
+    def _on_microphone_ready(self, handle, device_index):
+        if not self.is_recording:
+            try:
+                if handle is not None:
+                    handle(wait_for_stop=False)
+            except Exception:
+                pass
+            return
+        if self.settings.get("microphone_index") is None and device_index is not None:
+            self.settings["microphone_index"] = device_index
+            self.save_settings()
+            print(f"DEBUG: Fallback auto-selected microphone index {device_index}")
+        self.background_listen_stop_handle = handle
+
+    def _on_microphone_failed(self, message):
+        self.is_recording = False
+        self.record_button.setText("🔴 Listen")
+        self.background_listen_stop_handle = None
+        self.show_error_message(message)
 
     def audio_accumulation_callback(self, recognizer, audio_data):
         """Called by listen_in_background; accumulates audio data."""
@@ -1717,6 +1762,7 @@ class MainWindow(QMainWindow):
         if not self.is_recording:
             return # Already stopped or was never started properly
         self.is_recording = False # Signal that recording should stop accumulation
+        self._mic_start_generation += 1  # Cancel any in-flight mic startup
         self.record_button.setText("🔴 Listen")
 
         if self.background_listen_stop_handle:
@@ -2062,7 +2108,7 @@ class MainWindow(QMainWindow):
             text_cursor.setPosition(target_pos)
             self.polished_text_area.setTextCursor(text_cursor)
             self.polished_text_area.insertPlainText(text)
-            pyperclip.copy(self.polished_text_area.toPlainText())
+            copy_text_to_clipboard(self.polished_text_area.toPlainText())
             if self.opened_note_id and hasattr(self, "note_detail_edit"):
                 self.note_detail_edit.blockSignals(True)
                 self.note_detail_edit.setPlainText(self.polished_text_area.toPlainText())
@@ -2076,6 +2122,7 @@ class MainWindow(QMainWindow):
                 ORIGIN_POLISHED_TEXT,
                 create_if_missing=True,
                 show_message=False,
+                immediate=False,
             )
 
         QTimer.singleShot(0, self._refresh_all_ghost_cursors)
@@ -2522,7 +2569,7 @@ class MainWindow(QMainWindow):
         self.refresh_notes_list()
 
     def copy_opened_note(self):
-        pyperclip.copy(self.note_detail_edit.toPlainText())
+        copy_text_to_clipboard(self.note_detail_edit.toPlainText())
         self.show_status_message("Note copied.")
 
     def _on_note_detail_changed(self):
@@ -2566,7 +2613,7 @@ class MainWindow(QMainWindow):
         if chosen == open_action:
             self.open_saved_note(note_id)
         elif chosen == copy_action:
-            pyperclip.copy(note.content)
+            copy_text_to_clipboard(note.content)
             self.show_status_message("Note copied.")
         elif chosen == delete_action:
             reply = QMessageBox.question(
@@ -2885,7 +2932,6 @@ class MainWindow(QMainWindow):
             return
 
         doc = text_edit.document()
-        obj_name = text_edit.objectName()
         
         # Get the most current document length at the time of drawing
         current_doc_length = doc.characterCount()
@@ -2897,10 +2943,7 @@ class MainWindow(QMainWindow):
         if position_to_use > current_doc_length:
             position_to_use = current_doc_length
         
-        print(f"DEBUG: _show_ghost_cursor ({obj_name}): Initial StoredPos: {stored_position}, SanitizedPos: {position_to_use}, CurrentDocLen: {current_doc_length}")
-
-        if doc.isEmpty(): # Check based on current_doc_length or doc.isEmpty()
-            print(f"DEBUG: _show_ghost_cursor ({obj_name}): Document is empty. Clearing selections.")
+        if doc.isEmpty():
             text_edit.setExtraSelections([])
             return
 
@@ -2923,24 +2966,18 @@ class MainWindow(QMainWindow):
 
         if position_to_use == current_doc_length: 
             # Cursor is at the very end of non-empty text. Highlight the last character.
-            # current_doc_length >= 1, so position_to_use >= 1.
             sel_start = position_to_use - 1
             sel_end = position_to_use 
-            print(f"DEBUG: _show_ghost_cursor ({obj_name}): Highlighting last char. Sel: {sel_start}-{sel_end}.")
         else: 
             # Cursor is on a character (position_to_use < current_doc_length). Highlight that character.
             sel_start = position_to_use
             sel_end = position_to_use + 1
-            print(f"DEBUG: _show_ghost_cursor ({obj_name}): Highlighting char at pos. Sel: {sel_start}-{sel_end}.")
 
         # Final safety check for selection range before applying
-        # Ensure sel_start is valid, sel_end is valid, and sel_start < sel_end
         if not (0 <= sel_start < current_doc_length and 0 < sel_end <= current_doc_length and sel_start < sel_end):
-            print(f"DEBUG: _show_ghost_cursor ({obj_name}): Calculated selection [{sel_start}-{sel_end}] invalid for doc length {current_doc_length}. Clearing.")
             text_edit.setExtraSelections([])
             return
         
-        print(f"DEBUG: _show_ghost_cursor ({obj_name}): Applying selection: {sel_start} to {sel_end}")
         cursor_for_ghost.setPosition(sel_start)
         cursor_for_ghost.setPosition(sel_end, QTextCursor.MoveMode.KeepAnchor)
         
@@ -2989,7 +3026,7 @@ def check_dependencies():
     if not sys.platform.startswith("win") and not shutil.which("flac"):
         missing.append("flac")
 
-    # Check for xclip or xsel (required for pyperclip on Linux)
+    # Check for xclip or xsel (clipboard helpers on Linux X11 sessions)
     if sys.platform.startswith("linux"):
         if not shutil.which("xclip") and not shutil.which("xsel"):
             missing.append("xclip (or xsel)")
