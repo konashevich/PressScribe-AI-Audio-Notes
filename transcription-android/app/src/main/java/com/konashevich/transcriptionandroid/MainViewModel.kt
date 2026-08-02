@@ -25,7 +25,11 @@ import com.konashevich.pressscribe.data.SettingsRepository
 import com.konashevich.pressscribe.data.ThemeMode
 import com.konashevich.pressscribe.data.TranscriptionService
 import com.konashevich.pressscribe.data.VolumeButtonMode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -34,8 +38,6 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -55,11 +57,18 @@ data class MainUiState(
     val isImportingAudio: Boolean = false,
     val isTranscribing: Boolean = false,
     val isPolishing: Boolean = false,
+    val isTranslating: Boolean = false,
     val savedNotes: List<SavedNote> = emptyList(),
     val activeNoteId: String? = null,
     val openedNoteId: String? = null,
     val selectedNoteIds: Set<String> = emptySet(),
-)
+) {
+    val isAudioBusy: Boolean
+        get() = isRecording || isImportingAudio || isTranscribing
+
+    val isTextOpBusy: Boolean
+        get() = isPolishing || isTranslating
+}
 
 sealed interface UiEvent {
     data class Snackbar(val message: String) : UiEvent
@@ -79,6 +88,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val events: SharedFlow<UiEvent> = _events.asSharedFlow()
     private val pendingSharedImports = ArrayDeque<PendingImportRequest>()
     private var levelMeterJob: Job? = null
+    private var transcriptionJob: Job? = null
+    private var transcriptionGeneration: Int = 0
+    private var transcriptionTargetPath: String? = null
 
     init {
         viewModelScope.launch {
@@ -134,6 +146,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val audio = _uiState.value.importedAudio
         audio?.file?.delete()
         _uiState.update { it.copy(importedAudio = null) }
+        processPendingSharedImportIfIdle()
     }
 
     fun handleSharedAudioUris(uris: List<Uri>) {
@@ -145,19 +158,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             emitMessage("Received ${uris.size} audio files. Using the first one.")
         }
 
-        val request = PendingImportRequest(
-            uri = uris.first(),
-            sourceLabel = "Shared from another app",
-            autoTranscribe = true,
+        enqueueOrStartImport(
+            PendingImportRequest(
+                uri = uris.first(),
+                sourceLabel = "Shared from another app",
+                autoTranscribe = true,
+            ),
         )
-
-        pendingSharedImports.addLast(request)
-        if (isAudioOperationInProgress()) {
-            emitMessage("Queued shared audio. It will import when the current audio operation finishes.")
-            return
-        }
-
-        processPendingSharedImportIfIdle()
     }
 
     fun importAudioFromUri(
@@ -165,12 +172,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sourceLabel: String,
         autoTranscribe: Boolean,
     ) {
-        if (isAudioOperationInProgress()) {
-            emitMessage("Wait for the current audio operation to finish before importing another audio file.")
-            return
-        }
-
-        startImport(
+        enqueueOrStartImport(
             PendingImportRequest(
                 uri = uri,
                 sourceLabel = sourceLabel,
@@ -181,7 +183,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startRecording() {
         val state = _uiState.value
-        if (state.isRecording || state.isTranscribing) {
+        if (state.isRecording) {
+            return
+        }
+        if (state.isTranscribing || state.isImportingAudio) {
+            emitMessage("Wait for the current audio operation to finish.")
             return
         }
 
@@ -203,28 +209,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         levelMeterJob?.cancel()
         levelMeterJob = null
+
+        // Stop and promote synchronously before clearing isRecording so a quick re-Listen
+        // cannot discard this capture via AudioRecorder.start() -> stopAndDiscard().
+        val recordingFile = runCatching { audioRecorder.stop() }
+            .getOrNull()
+            ?.takeIf { it.exists() && it.length() > 0L }
+
         _uiState.update { it.copy(isRecording = false, listeningLevel = 0f) }
 
-        viewModelScope.launch {
-            val recordingFile = runCatching { audioRecorder.stop() }
-                .getOrNull()
-                ?.takeIf { it.exists() && it.length() > 0L }
+        if (recordingFile == null) {
+            emitMessage("No usable recording was captured.")
+            return
+        }
 
-            if (recordingFile == null) {
-                emitMessage("No usable recording was captured.")
-                return@launch
-            }
+        // Prefer the explicit Listen capture over any share/open queued while recording.
+        discardPendingImportsPreferringRecording()
 
-            val importedAudio = ImportedAudio(
+        // Always park the recording in the imported-audio slot before transcription.
+        // Transcription outcome must never clear this; only a new Listen/Share/import may replace it.
+        // Invalidate any in-flight transcription for a previous parked file.
+        invalidateTranscription()
+        replaceImportedAudio(
+            ImportedAudio(
                 file = recordingFile,
                 displayName = recordingFile.name,
                 mimeType = "audio/mp4",
                 sourceLabel = "Recorded in app",
-            )
-
-            replaceImportedAudio(importedAudio)
-            transcribeImportedAudio()
-        }
+            ),
+        )
+        transcribeImportedAudio()
     }
 
     fun transcribeImportedAudio() {
@@ -234,17 +248,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        if (_uiState.value.isRecording) {
+            emitMessage("Wait for recording to finish before transcribing.")
+            return
+        }
+
         if (_uiState.value.isImportingAudio) {
             emitMessage("Wait for the selected audio to finish importing.")
             return
         }
 
-        if (_uiState.value.isTranscribing) {
+        val targetPath = importedAudio.file.absolutePath
+        if (_uiState.value.isTranscribing && transcriptionTargetPath == targetPath) {
             return
         }
 
+        invalidateTranscription()
+        val generation = ++transcriptionGeneration
+        transcriptionTargetPath = targetPath
         _uiState.update { it.copy(isTranscribing = true) }
-        viewModelScope.launch {
+        transcriptionJob = viewModelScope.launch {
             try {
                 val settings = _uiState.value.settings
                 val transcript = when (settings.transcriptionService) {
@@ -255,30 +278,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         selfHostedAsrClient.transcribeAudio(importedAudio.file, importedAudio.mimeType, settings)
                 }
 
+                ensureActive()
+                if (generation != transcriptionGeneration) {
+                    return@launch
+                }
+                if (_uiState.value.importedAudio?.file?.absolutePath != targetPath) {
+                    return@launch
+                }
+
+                val trimmed = transcript.trim()
+                if (trimmed.isEmpty()) {
+                    emitMessage(
+                        "Transcription returned no text. Audio kept — tap Transcribe to retry.",
+                    )
+                    return@launch
+                }
+
                 _uiState.update { state ->
                     state.copy(
                         rawTextValue = insertIntoField(
                             current = state.rawTextValue,
                             insertion = buildTranscriptInsertion(
                                 currentText = state.rawTextValue.text,
-                                transcript = transcript,
+                                transcript = trimmed,
                                 sourceLabel = importedAudio.sourceLabel,
                             ),
                         ),
                     )
                 }
                 emitMessage("Transcription added to Raw Transcription.")
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
-                emitMessage("Transcription failed: ${error.message ?: error.javaClass.simpleName}")
+                if (generation == transcriptionGeneration) {
+                    // Keep importedAudio as-is so the user can retry via Transcribe.
+                    emitMessage(
+                        "Transcription failed: ${error.message ?: error.javaClass.simpleName}. " +
+                            "Audio kept — tap Transcribe to retry.",
+                    )
+                }
             } finally {
-                _uiState.update { it.copy(isTranscribing = false) }
-                processPendingSharedImportIfIdle()
+                if (generation == transcriptionGeneration) {
+                    transcriptionJob = null
+                    transcriptionTargetPath = null
+                    _uiState.update { it.copy(isTranscribing = false) }
+                    processPendingSharedImportIfIdle()
+                }
             }
         }
     }
 
     fun polishText() {
-        if (_uiState.value.isPolishing) {
+        if (_uiState.value.isTextOpBusy) {
+            if (!_uiState.value.isPolishing) {
+                emitMessage("Wait for the current text operation to finish.")
+            }
             return
         }
 
@@ -314,7 +368,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun polishAndTranslateText() {
-        if (_uiState.value.isPolishing) {
+        if (_uiState.value.isTextOpBusy) {
+            if (!_uiState.value.isTranslating) {
+                emitMessage("Wait for the current text operation to finish.")
+            }
             return
         }
 
@@ -332,7 +389,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            _uiState.update { it.copy(isPolishing = true) }
+            _uiState.update { it.copy(isTranslating = true) }
             try {
                 val translated = geminiApiClient.polishAndTranslateText(
                     text = textToProcess,
@@ -353,7 +410,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (error: Exception) {
                 emitMessage("Translate failed: ${error.message ?: error.javaClass.simpleName}")
             } finally {
-                _uiState.update { it.copy(isPolishing = false) }
+                _uiState.update { it.copy(isTranslating = false) }
             }
         }
     }
@@ -392,6 +449,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun exportImportedAudioTo(uri: Uri) {
+        if (isAudioOperationInProgress()) {
+            emitMessage("Wait for the current audio operation to finish before saving the audio.")
+            return
+        }
+
         val importedAudio = _uiState.value.importedAudio
         if (importedAudio == null) {
             emitMessage("No imported audio is loaded.")
@@ -613,6 +675,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         levelMeterJob?.cancel()
+        invalidateTranscription()
         audioRecorder.stopAndDiscard()
         _uiState.value.importedAudio?.file?.delete()
         super.onCleared()
@@ -732,6 +795,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun enqueueOrStartImport(request: PendingImportRequest) {
+        if (isAudioOperationInProgress()) {
+            // Keep-latest queue for both Open Audio and Share while busy.
+            pendingSharedImports.clear()
+            pendingSharedImports.addLast(request)
+            emitMessage(
+                if (_uiState.value.importedAudio != null || _uiState.value.isRecording) {
+                    "Queued audio. Clear parked audio when ready to import it."
+                } else {
+                    "Queued audio. It will import when the current audio operation finishes."
+                },
+            )
+            return
+        }
+
+        startImport(request)
+    }
+
+    private fun discardPendingImportsPreferringRecording() {
+        if (pendingSharedImports.isEmpty()) {
+            return
+        }
+        pendingSharedImports.clear()
+        emitMessage("Kept your recording; discarded queued audio.")
+    }
+
+    private fun invalidateTranscription() {
+        transcriptionGeneration += 1
+        transcriptionJob?.cancel()
+        transcriptionJob = null
+        transcriptionTargetPath = null
+        if (_uiState.value.isTranscribing) {
+            _uiState.update { it.copy(isTranscribing = false) }
+        }
+    }
+
     private fun processPendingSharedImportIfIdle() {
         if (isAudioOperationInProgress()) {
             return
@@ -741,13 +840,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        // Keep parked Listen/import audio available for Transcribe retry until the user clears it.
+        if (_uiState.value.importedAudio != null) {
+            return
+        }
+
         val nextRequest = pendingSharedImports.removeFirst()
         startImport(nextRequest)
     }
 
     private fun isAudioOperationInProgress(): Boolean {
-        val state = _uiState.value
-        return state.isImportingAudio || state.isTranscribing
+        return _uiState.value.isAudioBusy
     }
 
     private suspend fun copyUriToImportedAudio(uri: Uri, sourceLabel: String): ImportedAudio {

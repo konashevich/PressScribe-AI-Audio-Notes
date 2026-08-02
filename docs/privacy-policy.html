@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PressScribe Privacy Policy</title>
+  <style>
+    :root {
+      --text: #1a1a1a;
+      --muted: #555;
+      --line: #ddd;
+      --bg: #fafafa;
+      --card: #fff;
+      --accent: #0078d7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--text);
+      background: var(--bg);
+      line-height: 1.65;
+    }
+    main {
+      max-width: 42rem;
+      margin: 0 auto;
+      padding: 2.5rem 1.25rem 4rem;
+      background: var(--card);
+      min-height: 100vh;
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+    }
+    h1 {
+      font-size: 1.85rem;
+      margin: 0 0 0.35rem;
+      letter-spacing: -0.02em;
+    }
+    .meta { color: var(--muted); font-size: 0.95rem; margin-bottom: 2rem; }
+    h2 {
+      font-size: 1.2rem;
+      margin: 2rem 0 0.65rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid var(--line);
+    }
+    p, li { font-size: 1.02rem; }
+    ul { padding-left: 1.25rem; }
+    li { margin: 0.35rem 0; }
+    a { color: var(--accent); }
+    .note {
+      margin-top: 2.5rem;
+      padding: 0.9rem 1rem;
+      border: 1px solid var(--line);
+      background: #f5f5f5;
+      font-size: 0.92rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>PressScribe Privacy Policy</h1>
+    <p class="meta">Last updated: 23 July 2026 · App package: <code>com.konashevich.pressscribe</code></p>
+
+    <p>
+      PressScribe (“the App”) is an Android audio note and transcription tool published by
+      Oleksii Konashevych. This policy explains what data the App handles and how it is used.
+    </p>
+
+    <h2>1. Summary</h2>
+    <p>
+      PressScribe does not run its own backend for accounts, analytics, advertising, or crash reporting.
+      Audio and text you create are processed either on device (local storage) or by services
+      <strong>you</strong> choose to configure: Google Gemini and/or a self-hosted speech recognition server.
+    </p>
+
+    <h2>2. Data the App processes</h2>
+    <ul>
+      <li><strong>Microphone audio</strong> — when you record inside the App (requires microphone permission).</li>
+      <li><strong>Imported or shared audio files</strong> — when you import audio or another app shares audio with PressScribe.</li>
+      <li><strong>Transcript and polished text</strong> — text generated or edited in the App, including notes you save.</li>
+      <li><strong>Settings you enter</strong> — for example your Gemini API key, model name, prompts, listen/volume preferences, and optional self-hosted server host/port/path.</li>
+    </ul>
+
+    <h2>3. Where data is stored</h2>
+    <ul>
+      <li><strong>On your device:</strong> settings (including API key), saved notes, and temporary audio files used for transcription are stored in the App’s local Android storage / sandbox.</li>
+      <li><strong>Not on PressScribe servers:</strong> the developer does not operate a PressScribe cloud that receives your audio, transcripts, or API keys.</li>
+    </ul>
+
+    <h2>4. Network transfers you enable</h2>
+    <p>Depending on your settings, the App may send data over the internet:</p>
+    <ul>
+      <li>
+        <strong>Google Gemini (default option):</strong> when Gemini transcription or text polishing/translation is used,
+        audio and/or text are sent to Google’s Gemini API using the API key you provide.
+        Google’s processing is governed by Google’s terms and privacy policy for the Gemini / Google AI APIs.
+      </li>
+      <li>
+        <strong>Self-hosted ASR:</strong> when you select a self-hosted transcription service, audio is uploaded to the
+        server address you configure. That server is controlled by you or your organization, not by PressScribe.
+      </li>
+    </ul>
+    <p>
+      If you do not configure a Gemini API key and do not use a self-hosted server, the App will not be able to
+      complete cloud transcription or polishing features.
+    </p>
+
+    <h2>5. Permissions</h2>
+    <ul>
+      <li><strong>Microphone</strong> — to record audio for transcription.</li>
+      <li><strong>Internet</strong> — to call Gemini or your self-hosted ASR endpoint.</li>
+      <li><strong>Vibrate</strong> — optional haptic feedback when recording starts/stops.</li>
+    </ul>
+
+    <h2>6. Data we do not collect</h2>
+    <p>PressScribe does not intentionally collect or sell:</p>
+    <ul>
+      <li>Advertising IDs or ad profiles</li>
+      <li>Analytics / telemetry SDKs for marketing</li>
+      <li>Account registration data (no PressScribe login)</li>
+      <li>Precise location, contacts, or SMS</li>
+    </ul>
+
+    <h2>7. Children’s privacy</h2>
+    <p>
+      The App is not directed at children under 13. Do not use the App to submit personal information about children
+      to third-party AI services.
+    </p>
+
+    <h2>8. Your controls</h2>
+    <ul>
+      <li>Revoke microphone permission in Android system settings.</li>
+      <li>Delete or clear notes and settings inside the App, or clear app storage in Android settings.</li>
+      <li>Remove your Gemini API key from Settings.</li>
+      <li>Uninstalling the App removes local App data from the device (subject to Android backups you may have enabled).</li>
+    </ul>
+
+    <h2>9. Third-party services</h2>
+    <ul>
+      <li>Google Play (distribution / optional Play services on the device)</li>
+      <li>Google Gemini API (when configured by you)</li>
+      <li>Any self-hosted ASR endpoint you configure</li>
+    </ul>
+    <p>Those providers process data under their own policies when you use them.</p>
+
+    <h2>10. Changes</h2>
+    <p>
+      This policy may be updated. The “Last updated” date at the top will change when material revisions are published
+      at this URL.
+    </p>
+
+    <h2>11. Terms of Service</h2>
+    <p>
+      Use of the App is also subject to the
+      <a href="./terms-of-service.html">PressScribe Terms of Service</a>.
+    </p>
+
+    <h2>12. Contact</h2>
+    <p>
+      Privacy questions:
+      <a href="mailto:a.konashevich@gmail.com">a.konashevich@gmail.com</a><br />
+      Project repository:
+      <a href="https://github.com/konashevich/PressScribe-AI-Audio-Notes">github.com/konashevich/PressScribe-AI-Audio-Notes</a>
+    </p>
+
+    <p class="note">
+      This page is provided to meet Google Play Store Listing transparency requirements and describes the App’s
+      current behaviour. It is not formal legal advice.
+    </p>
+  </main>
+</body>
+</html>
