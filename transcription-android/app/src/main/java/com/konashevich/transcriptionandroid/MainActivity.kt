@@ -97,28 +97,55 @@ class MainActivity : ComponentActivity() {
         if (intent == null) {
             return
         }
-        // Recreating from recents/process death redelivers the original share Intent.
-        if (!isFreshLaunch || (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {
-            viewModel.clearPendingSharedImports()
-            return
-        }
+
+        val fromHistory = (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
         val uris = extractAudioUris(intent)
-        if (uris.isEmpty()) {
+
+        // Config change / history restore: do not re-import. Only clear the queue when
+        // this restore still carries a share payload (a real replay), not on plain rotation.
+        if (!isFreshLaunch || fromHistory) {
+            if (uris.isNotEmpty()) {
+                viewModel.clearPendingSharedImports()
+                consumeHandledShareIntent(intent)
+            }
             return
         }
+
+        if (uris.isEmpty()) {
+            // Normal launcher open — allow the same file to be shared again later.
+            clearShareSignature()
+            return
+        }
+
         val signature = uris.joinToString("\n") { it.toString() }
-        // Process-death / task restore can look like a fresh onCreate without HISTORY.
-        // Skip the same share unless it arrived via onNewIntent (a real new share).
-        if (!fromNewIntent && signature == shareDedupePrefs.getString(KEY_LAST_SHARE_SIGNATURE, null)) {
+        val lastSignature = shareDedupePrefs.getString(KEY_LAST_SHARE_SIGNATURE, null)
+        val lastAt = shareDedupePrefs.getLong(KEY_LAST_SHARE_AT, 0L)
+        val now = System.currentTimeMillis()
+        // OEM process-death reopen can look like a fresh onCreate without HISTORY.
+        // Time-box so intentional re-shares of the same file still work.
+        val recentDuplicate = !fromNewIntent &&
+            signature == lastSignature &&
+            now - lastAt in 0 until SHARE_DEDUPE_WINDOW_MS
+
+        if (recentDuplicate) {
             viewModel.clearPendingSharedImports()
             consumeHandledShareIntent(intent)
             return
         }
+
         shareDedupePrefs.edit()
             .putString(KEY_LAST_SHARE_SIGNATURE, signature)
+            .putLong(KEY_LAST_SHARE_AT, now)
             .apply()
         viewModel.handleSharedAudioUris(uris)
         consumeHandledShareIntent(intent)
+    }
+
+    private fun clearShareSignature() {
+        shareDedupePrefs.edit()
+            .remove(KEY_LAST_SHARE_SIGNATURE)
+            .remove(KEY_LAST_SHARE_AT)
+            .apply()
     }
 
     private fun handleHoldAnyVolumeEvent(event: KeyEvent): Boolean {
@@ -250,5 +277,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val KEY_LAST_SHARE_SIGNATURE = "last_share_signature"
+        private const val KEY_LAST_SHARE_AT = "last_share_at"
+        private const val SHARE_DEDUPE_WINDOW_MS = 120_000L
     }
 }

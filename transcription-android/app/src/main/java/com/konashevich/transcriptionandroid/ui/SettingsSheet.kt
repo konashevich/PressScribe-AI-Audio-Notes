@@ -97,25 +97,59 @@ fun SettingsSheet(
     var serverHostText by rememberSaveable { mutableStateOf(settings.serverHost) }
     var serverPortText by rememberSaveable { mutableStateOf(settings.serverPort) }
     var serverPathText by rememberSaveable { mutableStateOf(settings.serverPath) }
+    var lastFlushedPolish by remember { mutableStateOf(settings.polishPrompt) }
+    var lastFlushedTranslate by remember { mutableStateOf(settings.translatePolishPrompt) }
+    var lastFlushedApiKey by remember { mutableStateOf(settings.geminiApiKey) }
+    var lastFlushedModel by remember { mutableStateOf(settings.geminiModel) }
+    var lastFlushedHost by remember { mutableStateOf(settings.serverHost) }
+    var lastFlushedPort by remember { mutableStateOf(settings.serverPort) }
+    var lastFlushedPath by remember { mutableStateOf(settings.serverPath) }
+    val disposeGuard = remember { object { var skipFlush = false } }
 
     fun flushDeferredTextSettings() {
-        onPolishPromptChanged(polishPromptText)
-        onTranslatePolishPromptChanged(translatePromptText)
-        onGeminiApiKeyChanged(geminiApiKeyText)
-        onGeminiModelChanged(geminiModelText)
-        onServerHostChanged(serverHostText)
-        onServerPortChanged(serverPortText)
-        onServerPathChanged(serverPathText)
+        if (polishPromptText != lastFlushedPolish) {
+            onPolishPromptChanged(polishPromptText)
+            lastFlushedPolish = polishPromptText
+        }
+        if (translatePromptText != lastFlushedTranslate) {
+            onTranslatePolishPromptChanged(translatePromptText)
+            lastFlushedTranslate = translatePromptText
+        }
+        if (geminiApiKeyText != lastFlushedApiKey) {
+            onGeminiApiKeyChanged(geminiApiKeyText)
+            lastFlushedApiKey = geminiApiKeyText
+        }
+        if (geminiModelText != lastFlushedModel) {
+            onGeminiModelChanged(geminiModelText)
+            lastFlushedModel = geminiModelText
+        }
+        if (serverHostText != lastFlushedHost) {
+            onServerHostChanged(serverHostText)
+            lastFlushedHost = serverHostText
+        }
+        if (serverPortText != lastFlushedPort) {
+            onServerPortChanged(serverPortText)
+            lastFlushedPort = serverPortText
+        }
+        if (serverPathText != lastFlushedPath) {
+            onServerPathChanged(serverPathText)
+            lastFlushedPath = serverPathText
+        }
     }
 
-    // Flush drafts on any leave (welcome jump, parent hide, process teardown).
+    // Flush dirty drafts on leave, unless we already flushed for import/welcome/dismiss.
     DisposableEffect(Unit) {
-        onDispose { flushDeferredTextSettings() }
+        onDispose {
+            if (!disposeGuard.skipFlush) {
+                flushDeferredTextSettings()
+            }
+        }
     }
 
     ModalBottomSheet(
         onDismissRequest = {
             flushDeferredTextSettings()
+            disposeGuard.skipFlush = true
             onDismiss()
         },
         modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars),
@@ -155,6 +189,7 @@ fun SettingsSheet(
                 OutlinedButton(
                     onClick = {
                         flushDeferredTextSettings()
+                        disposeGuard.skipFlush = true
                         onShowWelcomeSetup()
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -235,6 +270,7 @@ fun SettingsSheet(
                 OutlinedButton(
                     onClick = {
                         flushDeferredTextSettings()
+                        disposeGuard.skipFlush = true
                         onImportSettings()
                     },
                 ) {
