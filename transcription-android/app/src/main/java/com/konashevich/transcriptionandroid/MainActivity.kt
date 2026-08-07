@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
@@ -22,6 +23,9 @@ class MainActivity : ComponentActivity() {
     private val heldVolumeKeys = mutableSetOf<Int>()
     private var pendingHardwareStartOnPermissionGrant = false
     private var holdVolumeOwnsCurrentRecording = false
+    private val shareDedupePrefs by lazy {
+        getSharedPreferences("share_dedupe", MODE_PRIVATE)
+    }
     private val recordPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -32,6 +36,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
         setContent {
@@ -44,13 +49,21 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        handleIncomingIntent(intent)
+        handleIncomingIntent(
+            intent = intent,
+            isFreshLaunch = savedInstanceState == null,
+            fromNewIntent = false,
+        )
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleIncomingIntent(intent)
+        handleIncomingIntent(
+            intent = intent,
+            isFreshLaunch = true,
+            fromNewIntent = true,
+        )
     }
 
     override fun onPause() {
@@ -60,6 +73,10 @@ class MainActivity : ComponentActivity() {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            if (!viewModel.uiState.value.settings.welcomeCompleted) {
+                // Until first-run setup finishes, do not treat volume as a record control.
+                return super.dispatchKeyEvent(event)
+            }
             val handled = when (viewModel.uiState.value.settings.volumeButtonMode) {
                 VolumeButtonMode.HOLD_ANY -> handleHoldAnyVolumeEvent(event)
                 VolumeButtonMode.TOGGLE_SPLIT -> handleToggleSplitVolumeEvent(event)
@@ -72,12 +89,36 @@ class MainActivity : ComponentActivity() {
         return super.dispatchKeyEvent(event)
     }
 
-    private fun handleIncomingIntent(intent: Intent?) {
-        val uris = extractAudioUris(intent)
-        if (uris.isNotEmpty()) {
-            viewModel.handleSharedAudioUris(uris)
-            consumeHandledShareIntent(intent)
+    private fun handleIncomingIntent(
+        intent: Intent?,
+        isFreshLaunch: Boolean,
+        fromNewIntent: Boolean,
+    ) {
+        if (intent == null) {
+            return
         }
+        // Recreating from recents/process death redelivers the original share Intent.
+        if (!isFreshLaunch || (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {
+            viewModel.clearPendingSharedImports()
+            return
+        }
+        val uris = extractAudioUris(intent)
+        if (uris.isEmpty()) {
+            return
+        }
+        val signature = uris.joinToString("\n") { it.toString() }
+        // Process-death / task restore can look like a fresh onCreate without HISTORY.
+        // Skip the same share unless it arrived via onNewIntent (a real new share).
+        if (!fromNewIntent && signature == shareDedupePrefs.getString(KEY_LAST_SHARE_SIGNATURE, null)) {
+            viewModel.clearPendingSharedImports()
+            consumeHandledShareIntent(intent)
+            return
+        }
+        shareDedupePrefs.edit()
+            .putString(KEY_LAST_SHARE_SIGNATURE, signature)
+            .apply()
+        viewModel.handleSharedAudioUris(uris)
+        consumeHandledShareIntent(intent)
     }
 
     private fun handleHoldAnyVolumeEvent(event: KeyEvent): Boolean {
@@ -205,5 +246,9 @@ class MainActivity : ComponentActivity() {
 
             else -> emptyList()
         }
+    }
+
+    companion object {
+        private const val KEY_LAST_SHARE_SIGNATURE = "last_share_signature"
     }
 }

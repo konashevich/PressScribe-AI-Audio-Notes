@@ -15,6 +15,7 @@ import com.konashevich.pressscribe.data.GeminiApiClient
 import com.konashevich.pressscribe.data.ImportedAudio
 import com.konashevich.pressscribe.data.ListenMode
 import com.konashevich.pressscribe.data.NotesRepository
+import com.konashevich.pressscribe.data.isPlausibleGeminiApiKey
 import com.konashevich.pressscribe.data.normalizeTranslateLanguageCode
 import com.konashevich.pressscribe.data.parseDesktopSettingsImport
 import com.konashevich.pressscribe.data.SavedNote
@@ -49,6 +50,8 @@ import java.util.Locale
 
 data class MainUiState(
     val settings: AppSettings = AppSettings(),
+    /** False until DataStore has emitted at least once (avoids welcome flash on cold start). */
+    val settingsReady: Boolean = false,
     val rawTextValue: TextFieldValue = TextFieldValue(""),
     val polishedTextValue: TextFieldValue = TextFieldValue(""),
     val importedAudio: ImportedAudio? = null,
@@ -62,6 +65,8 @@ data class MainUiState(
     val activeNoteId: String? = null,
     val openedNoteId: String? = null,
     val selectedNoteIds: Set<String> = emptySet(),
+    val isTestingApiKey: Boolean = false,
+    val isCompletingWelcome: Boolean = false,
 ) {
     val isAudioBusy: Boolean
         get() = isRecording || isImportingAudio || isTranscribing
@@ -94,8 +99,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
+            settingsRepository.migrateLegacyPromptsIfNeeded()
             settingsRepository.settingsFlow.collectLatest { settings ->
-                _uiState.update { it.copy(settings = settings) }
+                _uiState.update {
+                    it.copy(
+                        settings = settings,
+                        settingsReady = true,
+                    )
+                }
             }
         }
         loadSavedNotes()
@@ -513,6 +524,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return "${now}_${snippet}.json"
     }
 
+    fun clearPendingSharedImports() {
+        if (pendingSharedImports.isEmpty()) {
+            return
+        }
+        pendingSharedImports.clear()
+    }
+
     fun updateThemeMode(value: ThemeMode) = persist { settingsRepository.updateThemeMode(value) }
 
     fun updateFontSize(value: FontSizeOption) = persist { settingsRepository.updateFontSize(value) }
@@ -526,6 +544,55 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         persist { settingsRepository.updateTranscriptionService(value) }
 
     fun updateGeminiApiKey(value: String) = persist { settingsRepository.updateGeminiApiKey(value) }
+
+    fun completeWelcomeSetup(
+        apiKey: String,
+        listenMode: ListenMode,
+        volumeButtonMode: VolumeButtonMode,
+        onResult: (Boolean) -> Unit,
+    ) {
+        if (!isPlausibleGeminiApiKey(apiKey)) {
+            emitMessage("Enter a complete Gemini API key (no spaces, at least 20 characters).")
+            onResult(false)
+            return
+        }
+        if (_uiState.value.isCompletingWelcome) {
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isCompletingWelcome = true) }
+            runCatching {
+                settingsRepository.completeWelcomeSetup(
+                    apiKey = apiKey,
+                    listenMode = listenMode,
+                    volumeButtonMode = volumeButtonMode,
+                )
+            }.onSuccess {
+                onResult(true)
+            }.onFailure { error ->
+                emitMessage("Failed to save setting: ${error.message ?: error.javaClass.simpleName}")
+                onResult(false)
+            }
+            _uiState.update { it.copy(isCompletingWelcome = false) }
+        }
+    }
+
+    fun testGeminiApiKey(apiKey: String) {
+        if (_uiState.value.isTestingApiKey) {
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isTestingApiKey = true) }
+            runCatching {
+                geminiApiClient.testApiKey(apiKey)
+            }.onSuccess {
+                emitMessage("This Gemini API key works.")
+            }.onFailure { error ->
+                emitMessage("API key test failed: ${error.message ?: error.javaClass.simpleName}")
+            }
+            _uiState.update { it.copy(isTestingApiKey = false) }
+        }
+    }
 
     fun updateGeminiModel(value: String) = persist { settingsRepository.updateGeminiModel(value) }
 

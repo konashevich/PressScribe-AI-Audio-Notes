@@ -123,6 +123,25 @@ class GeminiApiClient(
             .ifBlank { throw IllegalStateException("Gemini returned an empty polished result.") }
     }
 
+    suspend fun testApiKey(apiKey: String): Unit = withContext(Dispatchers.IO) {
+        val key = apiKey.trim()
+        if (!isPlausibleGeminiApiKey(key)) {
+            throw IllegalStateException(
+                "Enter a complete Gemini API key first (no spaces, at least 20 characters).",
+            )
+        }
+        val request = Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1")
+            .header("x-goog-api-key", key)
+            .get()
+            .build()
+        val body = executeRequest(request)
+        val models = JSONObject(body).optJSONArray("models")
+        if (models == null || models.length() == 0) {
+            throw IllegalStateException("No models were returned for this key.")
+        }
+    }
+
     suspend fun polishAndTranslateText(
         text: String,
         settings: AppSettings,

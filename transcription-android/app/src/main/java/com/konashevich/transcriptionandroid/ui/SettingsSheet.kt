@@ -1,5 +1,7 @@
 package com.konashevich.pressscribe.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Column
@@ -32,6 +34,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,13 +42,16 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.konashevich.pressscribe.data.AppSettings
 import com.konashevich.pressscribe.data.FontSizeOption
 import com.konashevich.pressscribe.data.ListenMode
+import com.konashevich.pressscribe.data.PRIVACY_POLICY_URL
 import com.konashevich.pressscribe.data.ServerScheme
+import com.konashevich.pressscribe.data.TERMS_OF_SERVICE_URL
 import com.konashevich.pressscribe.data.TRANSLATE_LANGUAGE_PLACEHOLDER
 import com.konashevich.pressscribe.data.TRANSLATE_LANGUAGES
 import com.konashevich.pressscribe.data.ThemeMode
@@ -76,6 +82,7 @@ fun SettingsSheet(
     onVibrationDurationChanged: (String) -> Unit,
     onAutoSaveNotesChanged: (Boolean) -> Unit,
     onImportSettings: () -> Unit,
+    onShowWelcomeSetup: () -> Unit,
 ) {
     var timeoutText by rememberSaveable(settings.serverTimeoutSeconds) {
         mutableStateOf(settings.serverTimeoutSeconds.toString())
@@ -83,9 +90,34 @@ fun SettingsSheet(
     var vibrationText by rememberSaveable(settings.vibrationDurationMs) {
         mutableStateOf(settings.vibrationDurationMs.toString())
     }
+    var polishPromptText by rememberSaveable { mutableStateOf(settings.polishPrompt) }
+    var translatePromptText by rememberSaveable { mutableStateOf(settings.translatePolishPrompt) }
+    var geminiApiKeyText by rememberSaveable { mutableStateOf(settings.geminiApiKey) }
+    var geminiModelText by rememberSaveable { mutableStateOf(settings.geminiModel) }
+    var serverHostText by rememberSaveable { mutableStateOf(settings.serverHost) }
+    var serverPortText by rememberSaveable { mutableStateOf(settings.serverPort) }
+    var serverPathText by rememberSaveable { mutableStateOf(settings.serverPath) }
+
+    fun flushDeferredTextSettings() {
+        onPolishPromptChanged(polishPromptText)
+        onTranslatePolishPromptChanged(translatePromptText)
+        onGeminiApiKeyChanged(geminiApiKeyText)
+        onGeminiModelChanged(geminiModelText)
+        onServerHostChanged(serverHostText)
+        onServerPortChanged(serverPortText)
+        onServerPathChanged(serverPathText)
+    }
+
+    // Flush drafts on any leave (welcome jump, parent hide, process teardown).
+    DisposableEffect(Unit) {
+        onDispose { flushDeferredTextSettings() }
+    }
 
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            flushDeferredTextSettings()
+            onDismiss()
+        },
         modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars),
     ) {
         Column(
@@ -120,6 +152,15 @@ fun SettingsSheet(
                     labelOf = { it.label },
                     onSelected = onThemeChanged,
                 )
+                OutlinedButton(
+                    onClick = {
+                        flushDeferredTextSettings()
+                        onShowWelcomeSetup()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Show welcome setup")
+                }
             }
 
             SettingsSection("Font Size") {
@@ -191,7 +232,12 @@ fun SettingsSheet(
                     text = "Import supported values from a desktop-style settings JSON on the device.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                OutlinedButton(onClick = onImportSettings) {
+                OutlinedButton(
+                    onClick = {
+                        flushDeferredTextSettings()
+                        onImportSettings()
+                    },
+                ) {
                     Text("Import Settings JSON")
                 }
             }
@@ -199,15 +245,15 @@ fun SettingsSheet(
             SettingsSection("Gemini") {
                 OutlinedTextField(
                     modifier = Modifier.fillMaxWidth(),
-                    value = settings.geminiApiKey,
-                    onValueChange = onGeminiApiKeyChanged,
+                    value = geminiApiKeyText,
+                    onValueChange = { geminiApiKeyText = it },
                     label = { Text("API Key") },
                     visualTransformation = PasswordVisualTransformation(),
                 )
                 OutlinedTextField(
                     modifier = Modifier.fillMaxWidth(),
-                    value = settings.geminiModel,
-                    onValueChange = onGeminiModelChanged,
+                    value = geminiModelText,
+                    onValueChange = { geminiModelText = it },
                     label = { Text("Model") },
                 )
             }
@@ -221,15 +267,15 @@ fun SettingsSheet(
                 )
                 OutlinedTextField(
                     modifier = Modifier.fillMaxWidth(),
-                    value = settings.serverHost,
-                    onValueChange = onServerHostChanged,
+                    value = serverHostText,
+                    onValueChange = { serverHostText = it },
                     label = { Text("Host or IP") },
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(
                         modifier = Modifier.weight(1f),
-                        value = settings.serverPort,
-                        onValueChange = onServerPortChanged,
+                        value = serverPortText,
+                        onValueChange = { serverPortText = it },
                         label = { Text("Port") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     )
@@ -249,8 +295,8 @@ fun SettingsSheet(
                 }
                 OutlinedTextField(
                     modifier = Modifier.fillMaxWidth(),
-                    value = settings.serverPath,
-                    onValueChange = onServerPathChanged,
+                    value = serverPathText,
+                    onValueChange = { serverPathText = it },
                     label = { Text("Path") },
                 )
                 settings.selfHostedUrl()?.let { previewUrl ->
@@ -273,8 +319,8 @@ fun SettingsSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 180.dp),
-                    value = settings.polishPrompt,
-                    onValueChange = onPolishPromptChanged,
+                    value = polishPromptText,
+                    onValueChange = { polishPromptText = it },
                     label = { Text("System Prompt") },
                 )
             }
@@ -288,13 +334,42 @@ fun SettingsSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 180.dp),
-                    value = settings.translatePolishPrompt,
-                    onValueChange = onTranslatePolishPromptChanged,
+                    value = translatePromptText,
+                    onValueChange = { translatePromptText = it },
                     label = { Text("Translate System Prompt") },
                     supportingText = {
                         Text("Use $TRANSLATE_LANGUAGE_PLACEHOLDER for the target language name.")
                     },
                 )
+            }
+
+            SettingsSection("Legal") {
+                val context = LocalContext.current
+                Text(
+                    text = "Privacy Policy and Terms of Service for PressScribe.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    onClick = {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL)),
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Privacy Policy")
+                }
+                OutlinedButton(
+                    onClick = {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(TERMS_OF_SERVICE_URL)),
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Terms of Service")
+                }
             }
 
             Spacer(Modifier.height(12.dp))

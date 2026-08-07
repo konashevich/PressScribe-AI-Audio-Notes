@@ -23,9 +23,8 @@ class SettingsRepository(private val context: Context) {
                 .toEnumOrDefault(TranscriptionService.GEMINI),
             geminiApiKey = prefs[Keys.GEMINI_API_KEY].orEmpty().trim(),
             geminiModel = normalizeGeminiModel(prefs[Keys.GEMINI_MODEL].orEmpty()),
-            polishPrompt = prefs[Keys.POLISH_PROMPT].orEmpty().ifBlank { DEFAULT_POLISH_PROMPT },
-            translatePolishPrompt = prefs[Keys.TRANSLATE_POLISH_PROMPT].orEmpty()
-                .ifBlank { DEFAULT_TRANSLATE_POLISH_PROMPT },
+            polishPrompt = resolveStoredPolishPrompt(prefs[Keys.POLISH_PROMPT]),
+            translatePolishPrompt = resolveStoredTranslatePolishPrompt(prefs[Keys.TRANSLATE_POLISH_PROMPT]),
             translateLanguageCode = normalizeTranslateLanguageCode(
                 prefs[Keys.TRANSLATE_LANGUAGE_CODE].orEmpty(),
             ),
@@ -36,6 +35,7 @@ class SettingsRepository(private val context: Context) {
             serverTimeoutSeconds = prefs[Keys.SERVER_TIMEOUT_SECONDS] ?: 360,
             vibrationDurationMs = prefs[Keys.VIBRATION_DURATION_MS] ?: DEFAULT_VIBRATION_DURATION_MS,
             autoSaveNotes = prefs[Keys.AUTO_SAVE_NOTES] ?: true,
+            welcomeCompleted = prefs[Keys.WELCOME_COMPLETED] ?: false,
         )
     }
 
@@ -90,6 +90,39 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
+    suspend fun updateWelcomeCompleted(value: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.WELCOME_COMPLETED] = value
+        }
+    }
+
+    /** Write new stock prompts over blank/legacy defaults so storage matches what the UI shows. */
+    suspend fun migrateLegacyPromptsIfNeeded() {
+        context.dataStore.edit { prefs ->
+            val polish = prefs[Keys.POLISH_PROMPT]
+            if (needsPolishPromptMigration(polish)) {
+                prefs[Keys.POLISH_PROMPT] = DEFAULT_POLISH_PROMPT
+            }
+            val translate = prefs[Keys.TRANSLATE_POLISH_PROMPT]
+            if (needsTranslatePolishPromptMigration(translate)) {
+                prefs[Keys.TRANSLATE_POLISH_PROMPT] = DEFAULT_TRANSLATE_POLISH_PROMPT
+            }
+        }
+    }
+
+    suspend fun completeWelcomeSetup(
+        apiKey: String,
+        listenMode: ListenMode,
+        volumeButtonMode: VolumeButtonMode,
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.GEMINI_API_KEY] = apiKey.trim()
+            prefs[Keys.LISTEN_MODE] = listenMode.name
+            prefs[Keys.VOLUME_BUTTON_MODE] = volumeButtonMode.name
+            prefs[Keys.WELCOME_COMPLETED] = true
+        }
+    }
+
     suspend fun importSettings(patch: SettingsImportPatch) {
         context.dataStore.edit { prefs ->
             patch.themeMode?.let { prefs[Keys.THEME_MODE] = it.name }
@@ -140,6 +173,7 @@ class SettingsRepository(private val context: Context) {
         val SERVER_TIMEOUT_SECONDS = intPreferencesKey("server_timeout_seconds")
         val VIBRATION_DURATION_MS = intPreferencesKey("vibration_duration_ms")
         val AUTO_SAVE_NOTES = booleanPreferencesKey("auto_save_notes")
+        val WELCOME_COMPLETED = booleanPreferencesKey("welcome_completed")
     }
 }
 

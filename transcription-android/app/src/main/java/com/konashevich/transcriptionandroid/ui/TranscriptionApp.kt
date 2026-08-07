@@ -1,8 +1,10 @@
 package com.konashevich.pressscribe.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -14,9 +16,11 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -25,11 +29,17 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
@@ -79,6 +89,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -88,6 +100,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.SpanStyle
@@ -100,7 +114,6 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -116,7 +129,9 @@ import com.konashevich.pressscribe.UiEvent
 import com.konashevich.pressscribe.data.ImportedAudio
 import com.konashevich.pressscribe.data.ListenMode
 import com.konashevich.pressscribe.data.NotesRepository
+import com.konashevich.pressscribe.data.PRIVACY_POLICY_URL
 import com.konashevich.pressscribe.data.SavedNote
+import com.konashevich.pressscribe.data.TERMS_OF_SERVICE_URL
 import com.konashevich.pressscribe.data.findTranslateLanguage
 import com.konashevich.pressscribe.data.isConfiguredTranslateLanguage
 import kotlinx.coroutines.delay
@@ -137,6 +152,8 @@ fun TranscriptionApp(
     val pagerState = rememberPagerState(pageCount = { 2 })
 
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showWelcome by rememberSaveable { mutableStateOf(false) }
+    var welcomeSessionId by rememberSaveable { mutableIntStateOf(0) }
     var showAbout by rememberSaveable { mutableStateOf(false) }
     var showTranslateLanguagePicker by rememberSaveable { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
@@ -264,11 +281,62 @@ fun TranscriptionApp(
         Unit
     }
 
+    // Wait for DataStore before deciding welcome vs main — defaults have welcomeCompleted=false.
+    if (!state.settingsReady) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+        )
+        return
+    }
+
+    val showWelcomeOverlay = !state.settings.welcomeCompleted || showWelcome
+    if (showWelcomeOverlay) {
+        val isFirstRun = !state.settings.welcomeCompleted
+        Box(modifier = Modifier.fillMaxSize()) {
+            key(welcomeSessionId) {
+                WelcomeSetupScreen(
+                    sessionId = welcomeSessionId,
+                    initialApiKey = state.settings.geminiApiKey,
+                    initialListenMode = if (isFirstRun) null else state.settings.listenMode,
+                    initialVolumeMode = if (isFirstRun) null else state.settings.volumeButtonMode,
+                    isFirstRun = isFirstRun,
+                    isTestingApiKey = state.isTestingApiKey,
+                    isCompletingWelcome = state.isCompletingWelcome,
+                    onQuit = { (context as? Activity)?.finish() },
+                    onDismiss = { showWelcome = false },
+                    onTestApiKey = viewModel::testGeminiApiKey,
+                    onComplete = { apiKey, listenMode, volumeMode ->
+                        viewModel.completeWelcomeSetup(apiKey, listenMode, volumeMode) { saved ->
+                            if (saved) {
+                                showWelcome = false
+                            }
+                        }
+                    },
+                )
+            }
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
+        return
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
+        // Never let the soft keyboard resize the editor layout. Otherwise focusing the
+        // raw field and then pressing Listen shoves the mic button under the finger.
         Scaffold(
             modifier = Modifier.fillMaxSize(),
+            contentWindowInsets = WindowInsets.safeDrawing.exclude(WindowInsets.ime),
             topBar = {
                 TopAppBar(
+                    windowInsets = WindowInsets.statusBars,
                     title = {
                         Column {
                             Text("PressScribe", maxLines = 1)
@@ -459,6 +527,7 @@ fun TranscriptionApp(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
+                        .statusBarsPadding()
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                 )
             }
@@ -493,7 +562,13 @@ fun TranscriptionApp(
             onVibrationDurationChanged = viewModel::updateVibrationDurationMs,
             onAutoSaveNotesChanged = viewModel::updateAutoSaveNotes,
             onImportSettings = {
+                showSettings = false
                 importSettingsLauncher.launch(arrayOf("application/json"))
+            },
+            onShowWelcomeSetup = {
+                showSettings = false
+                welcomeSessionId += 1
+                showWelcome = true
             },
         )
     }
@@ -508,10 +583,32 @@ fun TranscriptionApp(
             },
             title = { Text("About") },
             text = {
-                Text(
-                    "Android edition of PressScribe with the same raw/polished workflow, " +
-                        "Gemini polishing, Gemini or self-hosted transcription, and audio sharing from other apps.",
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Android edition of PressScribe with the same raw/polished workflow, " +
+                            "Gemini polishing, Gemini or self-hosted transcription, and audio sharing from other apps.",
+                    )
+                    TextButton(
+                        onClick = {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL)),
+                            )
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Text("Privacy Policy")
+                    }
+                    TextButton(
+                        onClick = {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(TERMS_OF_SERVICE_URL)),
+                            )
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Text("Terms of Service")
+                    }
+                }
             },
         )
     }
@@ -929,10 +1026,8 @@ private fun ListeningGlowOverlay(
         animationSpec = tween(durationMillis = 320),
         label = "listening_glow_visibility",
     )
-    if (visibility <= 0.001f) {
-        return
-    }
-
+    // Keep infinite transitions unconditional so Compose remember order stays stable
+    // when the overlay fades in/out.
     val transition = rememberInfiniteTransition(label = "listening_glow")
     val breathing by transition.animateFloat(
         initialValue = 0.92f,
@@ -953,93 +1048,102 @@ private fun ListeningGlowOverlay(
         label = "listening_glow_shimmer",
     )
 
+    if (visibility <= 0.001f) {
+        return
+    }
+
     Canvas(modifier = modifier) {
-        val speechBoost = (0.18f + (level.coerceIn(0f, 1f) * 0.82f)) * visibility
-        val outerStroke = 18.dp.toPx() * breathing
-        val middleStroke = 11.dp.toPx() * shimmer
-        val innerStroke = 8.dp.toPx()
+        // Keep a strong base so the rim stays visible even when MediaRecorder
+        // reports flat amplitude (common on quiet input / some devices).
+        val speechBoost = (0.55f + (level.coerceIn(0f, 1f) * 0.45f)) * visibility
+        val outerStroke = 22.dp.toPx() * breathing
+        val middleStroke = 14.dp.toPx() * shimmer
+        val innerStroke = 9.dp.toPx()
         val cornerRadius = 24.dp.toPx()
-        val sideGlowWidth = 18.dp.toPx() + (18.dp.toPx() * level)
-        val topGlowHeight = 12.dp.toPx() + (10.dp.toPx() * level)
-        val bottomGlowHeight = 18.dp.toPx() + (18.dp.toPx() * level)
+        // Inset so strokes stay fully on-canvas (stroke is centered on the path).
+        val inset = outerStroke / 2f
+        val borderTopLeft = Offset(inset, inset)
+        val borderSize = Size(
+            (size.width - inset * 2f).coerceAtLeast(0f),
+            (size.height - inset * 2f).coerceAtLeast(0f),
+        )
+        val sideGlowWidth = 22.dp.toPx() + (22.dp.toPx() * level)
+        val topGlowHeight = 16.dp.toPx() + (12.dp.toPx() * level)
+        val bottomGlowHeight = 22.dp.toPx() + (22.dp.toPx() * level)
         val borderBrush = Brush.sweepGradient(
             colors = ListeningGlowColors,
             center = center,
         )
 
+        // SrcOver (default) so the glow stays visible on light and dark scaffolds.
+        // Screen blend only composites within the Canvas layer and looks nearly
+        // invisible against light Material backgrounds.
         drawRoundRect(
             brush = borderBrush,
-            topLeft = Offset.Zero,
-            size = size,
+            topLeft = borderTopLeft,
+            size = borderSize,
             cornerRadius = CornerRadius(cornerRadius, cornerRadius),
             style = Stroke(width = outerStroke),
-            alpha = 0.12f * speechBoost,
-            blendMode = BlendMode.Screen,
+            alpha = 0.28f * speechBoost,
         )
         drawRoundRect(
             brush = borderBrush,
-            topLeft = Offset.Zero,
-            size = size,
+            topLeft = borderTopLeft,
+            size = borderSize,
             cornerRadius = CornerRadius(cornerRadius, cornerRadius),
             style = Stroke(width = middleStroke),
-            alpha = 0.20f * speechBoost,
-            blendMode = BlendMode.Screen,
+            alpha = 0.42f * speechBoost,
         )
         drawRoundRect(
             brush = borderBrush,
-            topLeft = Offset.Zero,
-            size = size,
+            topLeft = borderTopLeft,
+            size = borderSize,
             cornerRadius = CornerRadius(cornerRadius, cornerRadius),
             style = Stroke(width = innerStroke),
-            alpha = 0.45f * speechBoost,
-            blendMode = BlendMode.Screen,
+            alpha = 0.72f * speechBoost,
         )
 
         drawRect(
             brush = Brush.horizontalGradient(
                 colors = listOf(
-                    Color(0xCC2BD6FF).copy(alpha = 0.38f * speechBoost),
+                    Color(0xFF2BD6FF).copy(alpha = 0.45f * speechBoost),
                     Color.Transparent,
                 ),
             ),
             topLeft = Offset.Zero,
             size = Size(sideGlowWidth, size.height),
-            blendMode = BlendMode.Screen,
         )
         drawRect(
             brush = Brush.horizontalGradient(
                 colors = listOf(
                     Color.Transparent,
-                    Color(0xCC7A5CFF).copy(alpha = 0.34f * speechBoost),
+                    Color(0xFF7A5CFF).copy(alpha = 0.40f * speechBoost),
                 ),
             ),
             topLeft = Offset(size.width - sideGlowWidth, 0f),
             size = Size(sideGlowWidth, size.height),
-            blendMode = BlendMode.Screen,
         )
         drawRect(
             brush = Brush.verticalGradient(
                 colors = listOf(
-                    Color(0x9926D8FF).copy(alpha = 0.22f * speechBoost),
+                    Color(0xFF26D8FF).copy(alpha = 0.28f * speechBoost),
                     Color.Transparent,
                 ),
             ),
             topLeft = Offset.Zero,
             size = Size(size.width, topGlowHeight),
-            blendMode = BlendMode.Screen,
         )
         drawRect(
             brush = Brush.verticalGradient(
                 colors = listOf(
                     Color.Transparent,
-                    Color(0xCC00C084).copy(alpha = 0.18f * speechBoost),
-                    Color(0xDD2BD6FF).copy(alpha = 0.42f * speechBoost),
-                    Color(0xDDFF7A59).copy(alpha = 0.22f * speechBoost),
+                    Color(0xFF00C084).copy(alpha = 0.22f * speechBoost),
+                    Color(0xFF2BD6FF).copy(alpha = 0.48f * speechBoost),
+                    Color(0xFFFF7A59).copy(alpha = 0.26f * speechBoost),
                 ),
             ),
             topLeft = Offset(0f, size.height - bottomGlowHeight),
             size = Size(size.width, bottomGlowHeight),
-            blendMode = BlendMode.Screen,
         )
     }
 }
@@ -1252,6 +1356,31 @@ private fun ListenControls(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val canStartListen = !state.isImportingAudio && !state.isTranscribing
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
+
+    fun dismissEditorIme() {
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+        // Also ask the platform window to hide IME immediately (Compose hide can lag a frame).
+        val view = (context as? Activity)?.currentFocus
+            ?: (context as? Activity)?.window?.decorView
+        if (view != null) {
+            val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                as? android.view.inputmethod.InputMethodManager
+            imm?.hideSoftInputFromWindow(view.windowToken, 0)
+        }
+    }
+
+    // Dismiss IME on the raw press signal before recording starts (not after recomposition).
+    LaunchedEffect(interactionSource, state.settings.listenMode) {
+        interactionSource.interactions.collect { interaction ->
+            if (interaction is PressInteraction.Press) {
+                dismissEditorIme()
+            }
+        }
+    }
 
     LaunchedEffect(
         isPressed,
@@ -1262,6 +1391,7 @@ private fun ListenControls(
     ) {
         if (state.settings.listenMode == ListenMode.HOLD && hasRecordPermission && canStartListen) {
             if (isPressed) {
+                dismissEditorIme()
                 onStartRecording()
             } else {
                 onStopRecording()
@@ -1271,6 +1401,7 @@ private fun ListenControls(
 
     Button(
         onClick = {
+            dismissEditorIme()
             when {
                 state.settings.listenMode == ListenMode.TOGGLE -> onToggleRecording()
                 !hasRecordPermission -> onRequestPermission()

@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PressScribe — Welcome setup concept</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --blue: #0078d7;
+      --blue-deep: #005a9e;
+      --green: #00c084;
+      --ink: #12161c;
+      --muted: #5a6570;
+      --paper: #f4f7fb;
+      --card: #ffffff;
+      --line: #d5dde6;
+      --phone-bezel: #1a1f26;
+      --danger: #c62828;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Source Sans 3", system-ui, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% -10%, rgba(0, 120, 215, 0.18), transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, rgba(0, 192, 132, 0.14), transparent 50%),
+        linear-gradient(165deg, #e8eef5 0%, #f7f9fc 45%, #eef3f8 100%);
+    }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 40px 24px 64px;
+    }
+
+    header {
+      margin-bottom: 36px;
+    }
+
+    header h1 {
+      font-family: Fraunces, Georgia, serif;
+      font-weight: 700;
+      font-size: clamp(1.8rem, 3vw, 2.4rem);
+      margin: 0 0 8px;
+      letter-spacing: -0.02em;
+    }
+
+    header p {
+      margin: 0;
+      max-width: 62ch;
+      color: var(--muted);
+      font-size: 1.05rem;
+      line-height: 1.5;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.7);
+      border: 1px solid var(--line);
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--blue-deep);
+    }
+
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(280px, 1fr));
+      gap: 40px;
+      align-items: start;
+      justify-items: center;
+    }
+
+    @media (max-width: 820px) {
+      .gallery { grid-template-columns: 1fr; }
+    }
+
+    .slide-label {
+      text-align: center;
+      margin-bottom: 14px;
+      font-weight: 700;
+      font-size: 0.95rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--blue-deep);
+    }
+
+    /* Phone frame — identical viewport for both screens */
+    .phone {
+      width: min(100%, 360px);
+      background: var(--phone-bezel);
+      border-radius: 36px;
+      padding: 12px;
+      box-shadow:
+        0 24px 60px rgba(18, 22, 28, 0.22),
+        0 2px 0 rgba(255, 255, 255, 0.08) inset;
+    }
+
+    .phone-screen {
+      background: var(--paper);
+      border-radius: 26px;
+      overflow: hidden;
+      width: 100%;
+      height: 740px;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 18px 4px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+
+    .screen-body {
+      flex: 1;
+      min-height: 0;
+      padding: 8px 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow-y: auto;
+    }
+
+    .brand {
+      font-family: Fraunces, Georgia, serif;
+      font-size: 1.85rem;
+      font-weight: 700;
+      margin: 8px 0 0;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+    }
+
+    .tagline {
+      margin: 2px 0 0;
+      font-size: 1.02rem;
+      font-weight: 500;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .step {
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--blue);
+    }
+
+    .lede {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+      font-size: 0.98rem;
+    }
+
+    .pitch {
+      list-style: none;
+      margin: 4px 0 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .pitch li {
+      position: relative;
+      padding-left: 1.15em;
+      font-size: 1.12rem;
+      font-weight: 600;
+      line-height: 1.35;
+      color: var(--ink);
+    }
+
+    .pitch li::before {
+      content: "•";
+      position: absolute;
+      left: 0;
+      color: var(--blue);
+      font-weight: 700;
+    }
+
+    .progress {
+      display: flex;
+      gap: 6px;
+      margin: 4px 0 2px;
+    }
+
+    .progress span {
+      height: 4px;
+      flex: 1;
+      border-radius: 999px;
+      background: var(--line);
+    }
+
+    .progress span.on {
+      background: linear-gradient(90deg, var(--blue), var(--green));
+    }
+
+    .section-title {
+      margin: 6px 0 0;
+      font-size: 1rem;
+      font-weight: 700;
+    }
+
+    .help {
+      margin: 0;
+      font-size: 0.9rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .link-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--blue-deep);
+      font-weight: 600;
+      font-size: 0.95rem;
+      text-decoration: none;
+      box-shadow: 0 1px 0 rgba(18, 22, 28, 0.04);
+    }
+
+    .help a {
+      color: var(--blue-deep);
+      font-weight: 600;
+      word-break: break-all;
+    }
+
+    .url-line {
+      margin-top: -4px;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .field label {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .field input {
+      width: 100%;
+      padding: 13px 14px;
+      border-radius: 12px;
+      border: 1.5px solid var(--line);
+      background: var(--card);
+      font: inherit;
+      font-size: 0.95rem;
+    }
+
+    .field input:focus {
+      outline: none;
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(0, 120, 215, 0.15);
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .ghost {
+      border: 1px solid var(--line);
+      background: transparent;
+      border-radius: 10px;
+      padding: 8px 12px;
+      font: inherit;
+      font-weight: 600;
+      font-size: 0.85rem;
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .check input { accent-color: var(--blue); }
+
+    .choice {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .choice-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      border: 1.5px solid var(--line);
+      background: var(--card);
+      border-radius: 12px;
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      text-align: left;
+      width: 100%;
+      font: inherit;
+      color: inherit;
+    }
+
+    .choice-card:hover {
+      border-color: rgba(0, 120, 215, 0.45);
+    }
+
+    .choice-card.selected {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(0, 120, 215, 0.12);
+      background: linear-gradient(180deg, #f7fbff, #fff);
+    }
+
+    .radio {
+      width: 20px;
+      height: 20px;
+      margin-top: 2px;
+      border-radius: 50%;
+      border: 2px solid #9aa5b1;
+      background: #fff;
+      flex-shrink: 0;
+      position: relative;
+    }
+
+    .choice-card.selected .radio {
+      border-color: var(--blue);
+    }
+
+    .choice-card.selected .radio::after {
+      content: "";
+      position: absolute;
+      inset: 3px;
+      border-radius: 50%;
+      background: var(--blue);
+    }
+
+    .choice-copy {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .choice-card strong {
+      display: block;
+      font-size: 1rem;
+      margin-bottom: 4px;
+    }
+
+    .choice-card p {
+      margin: 0;
+      font-size: 0.88rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .footer-actions {
+      margin-top: auto;
+      display: flex;
+      gap: 10px;
+      padding-top: 12px;
+    }
+
+    .btn {
+      flex: 1;
+      border: none;
+      border-radius: 12px;
+      padding: 14px 12px;
+      font: inherit;
+      font-weight: 700;
+      font-size: 0.98rem;
+      cursor: pointer;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      border: 1.5px solid var(--line);
+      color: var(--muted);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%);
+      color: #fff;
+      box-shadow: 0 8px 18px rgba(0, 120, 215, 0.28);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.45;
+      box-shadow: none;
+      cursor: not-allowed;
+    }
+
+    .brand.compact {
+      font-size: 1.45rem;
+    }
+
+    .note {
+      margin-top: 28px;
+      padding: 16px 18px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.45;
+    }
+
+    .note strong { color: var(--ink); }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <h1>Welcome setup — concept</h1>
+      <p>
+        Two-page first-run flow for Android: Gemini API key first (BYOK story), then both ways to record audio —
+        the on-screen Listen button <em>and</em> the physical volume buttons. Nothing is pre-selected.
+      </p>
+      <div class="meta">
+        <span class="chip">Page 1 · BYOK / API key</span>
+        <span class="chip">Page 2 · Record controls</span>
+        <span class="chip">No defaults</span>
+        <span class="chip">URL: aistudio.google.com/api-keys</span>
+      </div>
+    </header>
+
+    <div class="note" style="margin-top: 0; margin-bottom: 28px;">
+      <strong>Page 1 wording — Draft B (modified), in the phone below.</strong>
+      <ul style="margin: 10px 0 0; padding-left: 1.2rem; color: inherit;">
+        <li>Subtitle under PressScribe: <em>Transcribe Your Audio Notes with AI</em></li>
+        <li>Large bullets under the subtitle:
+          <em>PressScribe is genuinely free.</em> /
+          <em>BYOK: but you need your own API key</em>
+        </li>
+        <li>Help: “Google’s cloud AI is not free — get a Gemini key from AI Studio, then paste it here. Usage is billed to your Google account.”</li>
+      </ul>
+    </div>
+
+    <div class="gallery">
+      <!-- PAGE 1 -->
+      <div>
+        <div class="slide-label">Screen 1 of 2 · Draft B (modified)</div>
+        <div class="phone">
+          <div class="phone-screen">
+            <div class="status-bar"><span>9:41</span><span>PressScribe</span></div>
+            <div class="screen-body">
+              <div class="progress" aria-hidden="true">
+                <span class="on"></span>
+                <span></span>
+              </div>
+              <div class="step">Setup · 1 / 2</div>
+              <h2 class="brand">PressScribe</h2>
+              <p class="tagline">Transcribe Your Audio Notes with AI</p>
+              <ul class="pitch">
+                <li>PressScribe is genuinely free.</li>
+                <li>BYOK: but you need your own API key</li>
+              </ul>
+
+              <h3 class="section-title">Gemini API key</h3>
+              <p class="help">
+                Google’s cloud AI is not free — get a Gemini key from AI Studio, then paste it here. Usage is billed to your Google account.
+              </p>
+
+              <a class="link-btn" href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener">
+                Open API keys page
+              </a>
+              <p class="help url-line">
+                <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener">https://aistudio.google.com/api-keys</a>
+              </p>
+
+              <div class="field">
+                <label for="api">API key</label>
+                <input id="api" type="password" placeholder="Paste your Gemini API key" value="••••••••••••••••••••" />
+              </div>
+
+              <div class="row">
+                <label class="check"><input type="checkbox" /> Show key</label>
+                <button class="ghost" type="button">Test key</button>
+              </div>
+
+              <div class="footer-actions">
+                <button class="btn btn-secondary" type="button">Quit</button>
+                <button class="btn btn-primary" type="button">Continue</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PAGE 2 -->
+      <div>
+        <div class="slide-label">Screen 2 of 2</div>
+        <div class="phone">
+          <div class="phone-screen">
+            <div class="status-bar"><span>9:41</span><span>PressScribe</span></div>
+            <div class="screen-body">
+              <div class="progress" aria-hidden="true">
+                <span class="on"></span>
+                <span class="on"></span>
+              </div>
+              <div class="step">Setup · 2 / 2</div>
+              <h2 class="brand compact">Two ways to record yourself</h2>
+              <p class="lede">Choose one option in each group.</p>
+
+              <h3 class="section-title">Listen (record audio) button</h3>
+              <div class="choice" id="listen-choices" role="radiogroup" aria-label="Listen button mode">
+                <button class="choice-card" type="button" role="radio" aria-checked="false" data-mode="hold">
+                  <span class="radio" aria-hidden="true"></span>
+                  <span class="choice-copy">
+                    <strong>Press and Hold</strong>
+                    <p>Hold to record. Release to stop.</p>
+                  </span>
+                </button>
+                <button class="choice-card" type="button" role="radio" aria-checked="false" data-mode="toggle">
+                  <span class="radio" aria-hidden="true"></span>
+                  <span class="choice-copy">
+                    <strong>Tap to Toggle</strong>
+                    <p>Tap to start. Tap again to stop.</p>
+                  </span>
+                </button>
+              </div>
+
+              <h3 class="section-title">Volume buttons</h3>
+              <div class="choice" id="volume-choices" role="radiogroup" aria-label="Volume button mode">
+                <button class="choice-card" type="button" role="radio" aria-checked="false" data-mode="hold-any">
+                  <span class="radio" aria-hidden="true"></span>
+                  <span class="choice-copy">
+                    <strong>Hold either</strong>
+                    <p>Hold Vol+ or Vol− to record. Release to stop.</p>
+                  </span>
+                </button>
+                <button class="choice-card" type="button" role="radio" aria-checked="false" data-mode="toggle-split">
+                  <span class="radio" aria-hidden="true"></span>
+                  <span class="choice-copy">
+                    <strong>Vol+ / Vol−</strong>
+                    <p>Vol+ starts. Vol− stops.</p>
+                  </span>
+                </button>
+              </div>
+
+              <div class="footer-actions">
+                <button class="btn btn-secondary" type="button">Back</button>
+                <button class="btn btn-primary" type="button" id="get-started" disabled>Get started</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="note">
+      <strong>Concept notes:</strong>
+      Page 1 = genuinely free app + BYOK for Gemini
+      (<code>https://aistudio.google.com/api-keys</code>).
+      Page 2 introduces <em>both</em> ways to record audio: the on-screen Listen button and the physical volume keys
+      (same options as Settings). “Listen” is the button name; the action is recording. Neither group has a default;
+      Get started stays disabled until both are chosen.
+    </div>
+  </div>
+
+  <script>
+    const getStarted = document.getElementById("get-started");
+    let listenSelected = false;
+    let volumeSelected = false;
+
+    function refreshReady() {
+      getStarted.disabled = !(listenSelected && volumeSelected);
+    }
+
+    function wireGroup(selector, onPick) {
+      const cards = document.querySelectorAll(selector);
+      cards.forEach((card) => {
+        card.addEventListener("click", () => {
+          cards.forEach((c) => {
+            c.classList.remove("selected");
+            c.setAttribute("aria-checked", "false");
+          });
+          card.classList.add("selected");
+          card.setAttribute("aria-checked", "true");
+          onPick();
+          refreshReady();
+        });
+      });
+    }
+
+    wireGroup("#listen-choices .choice-card", () => { listenSelected = true; });
+    wireGroup("#volume-choices .choice-card", () => { volumeSelected = true; });
+  </script>
+</body>
+</html>
