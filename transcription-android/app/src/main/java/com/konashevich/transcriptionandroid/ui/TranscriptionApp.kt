@@ -21,7 +21,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -94,12 +94,14 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
@@ -329,8 +331,9 @@ fun TranscriptionApp(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // Never let the soft keyboard resize the editor layout. Otherwise focusing the
-        // raw field and then pressing Listen shoves the mic button under the finger.
+        // Soft-input mode is adjustNothing so the system does not resize the window.
+        // Typing still lifts content via imePadding below. Scaffold ignores IME insets
+        // so we do not double-apply them.
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             contentWindowInsets = WindowInsets.safeDrawing.exclude(WindowInsets.ime),
@@ -409,7 +412,8 @@ fun TranscriptionApp(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(innerPadding),
+                    .padding(innerPadding)
+                    .imePadding(),
             ) {
                 BoxWithConstraints(
                     modifier = Modifier.fillMaxSize(),
@@ -422,25 +426,26 @@ fun TranscriptionApp(
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        if (!state.isRecording) {
-                            state.importedAudio?.let { importedAudio ->
-                                ImportedAudioCard(
-                                    importedAudio = importedAudio,
-                                    expanded = importedExpanded,
-                                    isBusy = state.isTranscribing || state.isImportingAudio,
-                                    onExpandedChange = { importedExpanded = it },
-                                    onTranscribe = viewModel::transcribeImportedAudio,
-                                    onSave = {
-                                        saveImportedAudioLauncher.launch(
-                                            CreateDocumentRequest(
-                                                mimeType = importedAudio.mimeType,
-                                                displayName = importedAudio.displayName,
-                                            ),
-                                        )
-                                    },
-                                    onClear = viewModel::clearImportedAudio,
-                                )
-                            }
+                        // Keep this card mounted while recording. Hiding it on isRecording
+                        // collapses the column and slides the Listen button out from under the finger.
+                        state.importedAudio?.let { importedAudio ->
+                            ImportedAudioCard(
+                                importedAudio = importedAudio,
+                                expanded = importedExpanded,
+                                isBusy = state.isTranscribing || state.isImportingAudio,
+                                interactionsEnabled = !state.isRecording,
+                                onExpandedChange = { importedExpanded = it },
+                                onTranscribe = viewModel::transcribeImportedAudio,
+                                onSave = {
+                                    saveImportedAudioLauncher.launch(
+                                        CreateDocumentRequest(
+                                            mimeType = importedAudio.mimeType,
+                                            displayName = importedAudio.displayName,
+                                        ),
+                                    )
+                                },
+                                onClear = viewModel::clearImportedAudio,
+                            )
                         }
 
                         if (wideLayout) {
@@ -1354,16 +1359,22 @@ private fun ListenControls(
     onToggleRecording: () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
     val canStartListen = !state.isImportingAudio && !state.isTranscribing
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    val canStartListenLatest by rememberUpdatedState(canStartListen)
+    val hasRecordPermissionLatest by rememberUpdatedState(hasRecordPermission)
+    val onStartRecordingLatest by rememberUpdatedState(onStartRecording)
+    val onStopRecordingLatest by rememberUpdatedState(onStopRecording)
+    val onRequestPermissionLatest by rememberUpdatedState(onRequestPermission)
+    val imeVisibleLatest by rememberUpdatedState(imeBottomPx > with(density) { 8.dp.roundToPx() })
 
     fun dismissEditorIme() {
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
-        // Also ask the platform window to hide IME immediately (Compose hide can lag a frame).
         val view = (context as? Activity)?.currentFocus
             ?: (context as? Activity)?.window?.decorView
         if (view != null) {
@@ -1373,34 +1384,50 @@ private fun ListenControls(
         }
     }
 
-    // Dismiss IME on the raw press signal before recording starts (not after recomposition).
+    // Hold-to-record: if the keyboard is open, only dismiss it on this press so the
+    // layout can settle. The next press (keyboard gone) starts recording without a jump.
     LaunchedEffect(interactionSource, state.settings.listenMode) {
-        interactionSource.interactions.collect { interaction ->
-            if (interaction is PressInteraction.Press) {
-                dismissEditorIme()
-            }
+        if (state.settings.listenMode != ListenMode.HOLD) {
+            return@LaunchedEffect
         }
-    }
-
-    LaunchedEffect(
-        isPressed,
-        state.settings.listenMode,
-        hasRecordPermission,
-        state.isImportingAudio,
-        state.isTranscribing,
-    ) {
-        if (state.settings.listenMode == ListenMode.HOLD && hasRecordPermission && canStartListen) {
-            if (isPressed) {
-                dismissEditorIme()
-                onStartRecording()
-            } else {
-                onStopRecording()
+        var holdOwnsRecording = false
+        interactionSource.interactions.collect { interaction ->
+            when (interaction) {
+                is PressInteraction.Press -> {
+                    if (imeVisibleLatest) {
+                        dismissEditorIme()
+                        holdOwnsRecording = false
+                    } else {
+                        dismissEditorIme()
+                        when {
+                            hasRecordPermissionLatest && canStartListenLatest -> {
+                                onStartRecordingLatest()
+                                holdOwnsRecording = true
+                            }
+                            !hasRecordPermissionLatest -> {
+                                onRequestPermissionLatest()
+                                holdOwnsRecording = false
+                            }
+                            else -> holdOwnsRecording = false
+                        }
+                    }
+                }
+                is PressInteraction.Release, is PressInteraction.Cancel -> {
+                    if (holdOwnsRecording) {
+                        onStopRecordingLatest()
+                    }
+                    holdOwnsRecording = false
+                }
             }
         }
     }
 
     Button(
         onClick = {
+            if (imeVisibleLatest) {
+                dismissEditorIme()
+                return@Button
+            }
             dismissEditorIme()
             when {
                 state.settings.listenMode == ListenMode.TOGGLE -> onToggleRecording()
@@ -1539,11 +1566,13 @@ private fun ImportedAudioCard(
     importedAudio: ImportedAudio,
     expanded: Boolean,
     isBusy: Boolean,
+    interactionsEnabled: Boolean = true,
     onExpandedChange: (Boolean) -> Unit,
     onTranscribe: () -> Unit,
     onSave: () -> Unit,
     onClear: () -> Unit,
 ) {
+    val canInteract = interactionsEnabled && !isBusy
     Card {
         Column(
             modifier = Modifier
@@ -1554,7 +1583,7 @@ private fun ImportedAudioCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onExpandedChange(!expanded) },
+                    .clickable(enabled = interactionsEnabled) { onExpandedChange(!expanded) },
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1582,14 +1611,18 @@ private fun ImportedAudioCard(
                 ActionIconButton(
                     icon = Icons.Filled.Delete,
                     contentDescription = "Clear imported audio",
-                    enabled = !isBusy,
+                    enabled = canInteract,
                     onClick = onClear,
                 )
             }
 
             if (expanded) {
                 Text(
-                    text = importedAudio.sourceLabel,
+                    text = if (!interactionsEnabled) {
+                        "Recording… previous audio stays here until this take finishes."
+                    } else {
+                        importedAudio.sourceLabel
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
@@ -1604,12 +1637,13 @@ private fun ImportedAudioCard(
                         icon = Icons.Filled.PlayArrow,
                         contentDescription = "Transcribe imported audio",
                         isBusy = isBusy,
+                        enabled = canInteract,
                         onClick = onTranscribe,
                     )
                     ActionIconButton(
                         icon = Icons.Filled.Save,
                         contentDescription = "Save imported audio",
-                        enabled = !isBusy,
+                        enabled = canInteract,
                         onClick = onSave,
                     )
                 }
