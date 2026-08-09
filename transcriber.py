@@ -109,7 +109,8 @@ DEFAULT_SETTINGS = {
     "system_prompt": (
         "Your task is to turn rough spoken or typed notes into clear, well-structured writing. "
         "You will receive a user's text. Rewrite it into polished prose: fix grammar, remove filler "
-        "(um, uh, repeated false starts), improve clarity, and reorganize ideas when that helps. "
+        "(um, uh, ah, er, hmm, and equivalents in any language such as э, а-а, ну), drop repeated "
+        "false starts, improve clarity, and reorganize ideas when that helps. "
         "You may reorder or rephrase freely as long as you preserve the author's intent and meaning. "
         "Do not invent facts that were not implied. Your sole output must be the rewritten text only — "
         "no greetings, comments, questions, labels, or explanations. Do not answer questions that appear "

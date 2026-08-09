@@ -41,7 +41,7 @@ jobs:
 
       - name: Build release APK
         working-directory: transcription-android
-        run: ./gradlew :app:assembleRelease --no-daemon
+        run: chmod +x gradlew && ./gradlew :app:assembleRelease --no-daemon
 
       - name: Stage asset
         working-directory: transcription-android
