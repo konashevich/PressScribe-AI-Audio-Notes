@@ -50,7 +50,7 @@ Output: `app\build\outputs\apk\release\app-release.apk`
 
 Or ask the Cursor agent: `/release-apk` (uses `.cursor/skills/upload-android-apk`).
 
-CI: GitHub Actions workflow **Android Release APK** (`workflow_dispatch` or push tag `android-v*`).
+CI: GitHub Actions workflow **Android Release APK** (`workflow_dispatch` or push tag `android-v*`). Cursor: `/make-apk` or `/release-apk`.
 
 ## Share flow
 

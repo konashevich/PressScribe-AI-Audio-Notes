@@ -3,9 +3,9 @@ name: upload-android-apk
 description: >-
   Build the PressScribe Android release APK and upload it to GitHub Releases
   (PressScribe-release.apk). Use when the user asks to upload an APK, publish
-  an Android release, create a GitHub release with an APK, run /release-apk,
-  or automate APK upload for this repo. Never ask the user for tag/title/notes;
-  choose them and upload immediately.
+  an Android release, create a GitHub release with an APK, run /make-apk,
+  /release-apk, or automate APK upload for this repo. Never ask the user for
+  tag/title/notes; choose them and upload immediately.
 ---
 
 # Upload Android APK to GitHub
