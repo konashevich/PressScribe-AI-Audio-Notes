@@ -7,9 +7,12 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// Keep build outputs off OneDrive to avoid Windows file locks during release builds.
+// Keep build outputs off OneDrive on Windows to avoid file locks during release builds.
 val localBuildDir = File("D:/Android-Dev/PressScribe/gradle-build/app")
-if (localBuildDir.mkdirs() || localBuildDir.isDirectory) {
+if (
+    System.getProperty("os.name").lowercase().contains("win") &&
+    (localBuildDir.mkdirs() || localBuildDir.isDirectory)
+) {
     layout.buildDirectory.set(localBuildDir)
 }
 
