@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -280,14 +281,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(isTranscribing = true) }
         transcriptionJob = viewModelScope.launch {
             try {
-                val settings = _uiState.value.settings
-                val transcript = when (settings.transcriptionService) {
-                    TranscriptionService.GEMINI ->
-                        geminiApiClient.transcribeAudio(importedAudio.file, importedAudio.mimeType, settings)
-
-                    TranscriptionService.SELF_HOSTED ->
-                        selfHostedAsrClient.transcribeAudio(importedAudio.file, importedAudio.mimeType, settings)
+                awaitSettingsReady()
+                if (generation != transcriptionGeneration) {
+                    return@launch
                 }
+                val transcript = transcribeImportedAudioWithRetry(importedAudio)
 
                 ensureActive()
                 if (generation != transcriptionGeneration) {
@@ -357,6 +355,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.update { it.copy(isPolishing = true) }
             try {
+                awaitSettingsReady()
                 val polished = geminiApiClient.polishText(textToPolish, _uiState.value.settings)
                 _uiState.update { state ->
                     state.copy(
@@ -402,6 +401,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.update { it.copy(isTranslating = true) }
             try {
+                awaitSettingsReady()
                 val translated = geminiApiClient.polishAndTranslateText(
                     text = textToProcess,
                     settings = _uiState.value.settings,
@@ -847,11 +847,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 copyUriToImportedAudio(request.uri, request.sourceLabel)
             }.onSuccess { importedAudio ->
                 replaceImportedAudio(importedAudio)
-                emitMessage("${importedAudio.displayName} is ready.")
                 _uiState.update { it.copy(isImportingAudio = false) }
                 if (request.autoTranscribe) {
                     transcribeImportedAudio()
                 } else {
+                    emitMessage("${importedAudio.displayName} is ready.")
                     processPendingSharedImportIfIdle()
                 }
             }.onFailure { error ->
@@ -867,13 +867,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Keep-latest queue for both Open Audio and Share while busy.
             pendingSharedImports.clear()
             pendingSharedImports.addLast(request)
-            emitMessage(
-                if (_uiState.value.importedAudio != null || _uiState.value.isRecording) {
-                    "Queued audio. Clear parked audio when ready to import it."
-                } else {
-                    "Queued audio. It will import when the current audio operation finishes."
-                },
-            )
+            emitMessage("Queued audio. It will import when the current audio operation finishes.")
             return
         }
 
@@ -907,17 +901,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        // Keep parked Listen/import audio available for Transcribe retry until the user clears it.
-        if (_uiState.value.importedAudio != null) {
-            return
-        }
-
         val nextRequest = pendingSharedImports.removeFirst()
         startImport(nextRequest)
     }
 
     private fun isAudioOperationInProgress(): Boolean {
         return _uiState.value.isAudioBusy
+    }
+
+    private suspend fun awaitSettingsReady() {
+        if (_uiState.value.settingsReady) {
+            return
+        }
+        _uiState.first { it.settingsReady }
+    }
+
+    private suspend fun transcribeImportedAudioWithRetry(importedAudio: ImportedAudio): String {
+        suspend fun transcribe(settings: AppSettings): String {
+            return when (settings.transcriptionService) {
+                TranscriptionService.GEMINI -> {
+                    if (settings.geminiApiKey.isBlank()) {
+                        error("Gemini API key is not configured.")
+                    }
+                    geminiApiClient.transcribeAudio(
+                        importedAudio.file,
+                        importedAudio.mimeType,
+                        settings,
+                    )
+                }
+
+                TranscriptionService.SELF_HOSTED ->
+                    selfHostedAsrClient.transcribeAudio(
+                        importedAudio.file,
+                        importedAudio.mimeType,
+                        settings,
+                    )
+            }
+        }
+
+        return try {
+            transcribe(_uiState.value.settings)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            val message = error.message.orEmpty()
+            val looksLikeMissingKey = message.contains("API key", ignoreCase = true) ||
+                message.contains("API_KEY", ignoreCase = true)
+            if (!looksLikeMissingKey) {
+                throw error
+            }
+            awaitSettingsReady()
+            delay(400)
+            val refreshed = _uiState.value.settings
+            if (refreshed.transcriptionService == TranscriptionService.GEMINI &&
+                refreshed.geminiApiKey.isBlank()
+            ) {
+                throw error
+            }
+            transcribe(refreshed)
+        }
     }
 
     private suspend fun copyUriToImportedAudio(uri: Uri, sourceLabel: String): ImportedAudio {

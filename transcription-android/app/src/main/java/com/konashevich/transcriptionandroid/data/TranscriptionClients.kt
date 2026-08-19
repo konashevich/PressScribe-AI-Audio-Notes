@@ -71,7 +71,7 @@ class GeminiApiClient(
                 .post(payload.toString().toRequestBody(jsonMediaType))
                 .build()
 
-            extractText(executeRequest(request))
+            extractText(executeRequest(request, retryTransient = true))
                 .ifBlank { throw IllegalStateException("Gemini returned an empty transcription.") }
         } finally {
             deleteUploadedFile(uploadedFile.name, apiKey)
@@ -231,14 +231,41 @@ class GeminiApiClient(
             .build()
 
         val responseBody = executeRequest(uploadRequest)
-        val fileJson = JSONObject(responseBody).getJSONObject("file")
-        return UploadedGeminiFile(
+        val fileJson = JSONObject(responseBody).let { root ->
+            root.optJSONObject("file") ?: root
+        }
+        val uploaded = UploadedGeminiFile(
             name = fileJson.getString("name"),
             uri = fileJson.getString("uri"),
             mimeType = fileJson.optString("mimeType").ifBlank {
                 fileJson.optString("mime_type").ifBlank { mimeType }
             },
         )
+        waitUntilFileActive(uploaded.name, apiKey)
+        return uploaded
+    }
+
+    private fun waitUntilFileActive(fileName: String, apiKey: String) {
+        val deadline = System.currentTimeMillis() + 20_000
+        while (true) {
+            val request = Request.Builder()
+                .url("https://generativelanguage.googleapis.com/v1beta/$fileName")
+                .header("x-goog-api-key", apiKey)
+                .get()
+                .build()
+            val body = executeRequest(request)
+            val root = JSONObject(body)
+            val fileJson = root.optJSONObject("file") ?: root
+            val state = fileJson.optString("state")
+            when {
+                state.isBlank() || state == "ACTIVE" -> return
+                state == "FAILED" -> throw IOException("Gemini failed to process the uploaded audio.")
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                throw IOException("Gemini is still processing the uploaded audio. Tap Transcribe to retry.")
+            }
+            Thread.sleep(250)
+        }
     }
 
     private fun deleteUploadedFile(fileName: String, apiKey: String) {
@@ -253,14 +280,53 @@ class GeminiApiClient(
         }
     }
 
-    private fun executeRequest(request: Request): String {
-        return client.newCall(request).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                throw IOException("HTTP ${response.code}: $body")
+    private fun executeRequest(request: Request, retryTransient: Boolean = false): String {
+        var lastError: IOException? = null
+        val attempts = if (retryTransient) 3 else 1
+        repeat(attempts) { attempt ->
+            try {
+                return client.newCall(request).execute().use { response ->
+                    val body = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        val formatted = formatGeminiError(response.code, body)
+                        if (retryTransient && attempt < attempts - 1 && isRetryableGeminiError(response.code, formatted)) {
+                            throw RetryableGeminiException(formatted)
+                        }
+                        throw IOException(formatted)
+                    }
+                    body
+                }
+            } catch (error: RetryableGeminiException) {
+                lastError = IOException(error.message)
+                Thread.sleep(400L * (attempt + 1))
+            } catch (error: IOException) {
+                if (!retryTransient || attempt >= attempts - 1) {
+                    throw error
+                }
+                lastError = error
+                Thread.sleep(400L * (attempt + 1))
             }
-            body
         }
+        throw lastError ?: IOException("Gemini request failed.")
+    }
+
+    private fun formatGeminiError(code: Int, body: String): String {
+        val parsed = runCatching {
+            JSONObject(body).optJSONObject("error")?.optString("message").orEmpty()
+        }.getOrDefault("")
+        return parsed.ifBlank { "HTTP $code: $body" }
+    }
+
+    private fun isRetryableGeminiError(code: Int, message: String): Boolean {
+        if (code == 429 || code == 500 || code == 502 || code == 503) {
+            return true
+        }
+        val lower = message.lowercase()
+        return lower.contains("not in an active state") ||
+            lower.contains("file is not in an active") ||
+            lower.contains("unavailable") ||
+            lower.contains("api key not valid") ||
+            lower.contains("api_key_invalid")
     }
 
     private fun extractText(rawJson: String): String {
@@ -349,6 +415,8 @@ class SelfHostedAsrClient(
         return root.optString("transcription").trim()
     }
 }
+
+private class RetryableGeminiException(message: String) : IOException(message)
 
 private data class UploadedGeminiFile(
     val name: String,
