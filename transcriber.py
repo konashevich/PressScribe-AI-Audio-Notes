@@ -1,5 +1,6 @@
 import sys
 import threading
+import time
 import json
 import os
 import io
@@ -1694,7 +1695,7 @@ class MainWindow(QMainWindow):
         self.is_recording = True
         self._mic_start_generation += 1
         generation = self._mic_start_generation
-        self.record_button.setText("Listening...")
+        self.record_button.setText("Starting...")
         
         self.audio_frames = [] # Clear previous frames
         self.current_sample_rate = None
@@ -1708,45 +1709,132 @@ class MainWindow(QMainWindow):
             daemon=True,
         ).start()
 
+    def _microphone_session_is_current(self, generation):
+        return generation == self._mic_start_generation and self.is_recording
+
+    def _close_microphone_quietly(self, mic):
+        if mic is None:
+            return
+        try:
+            mic.__exit__(None, None, None)
+        except Exception:
+            pass
+
     def _start_microphone_worker(self, device_index, generation):
-        """Open the mic and calibrate off the UI thread (ambient adjust blocks)."""
+        """Open the mic off the UI thread and keep the stream open for the whole Listen session."""
+        last_error = None
         try:
             if device_index is None:
                 device_index = self.get_best_microphone_index()
             if device_index is None:
-                self.comm.microphone_failed.emit(
-                    "No microphone selected. Please select one in Settings > Microphone."
-                )
-                return
-            if generation != self._mic_start_generation or not self.is_recording:
-                return
-
-            mic = sr.Microphone(device_index=device_index)
-            print("DEBUG: Adjusting for ambient noise...")
-            with mic as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.35)
-            print(
-                f"DEBUG: Ambient noise adjustment done. Energy threshold: {self.recognizer.energy_threshold}"
-            )
-            if generation != self._mic_start_generation or not self.is_recording:
+                if self._microphone_session_is_current(generation):
+                    self.comm.microphone_failed.emit(
+                        "No microphone selected. Please select one in Settings > Microphone."
+                    )
                 return
 
-            handle = self.recognizer.listen_in_background(
-                mic,
-                self.audio_accumulation_callback,
-                phrase_time_limit=None,
-            )
-            if generation != self._mic_start_generation or not self.is_recording:
+            # Other apps (browser, chat, etc.) often hold the ALSA/PipeWire capture
+            # device for a moment after they stop. Opening, closing, and reopening
+            # the same device — as ambient-adjust + listen_in_background used to —
+            # fails immediately on this Linux setup. Retry the same device instead.
+            retry_delays_s = (0.0, 0.08, 0.16, 0.28, 0.45, 0.70)
+            for delay_s in retry_delays_s:
+                if not self._microphone_session_is_current(generation):
+                    return
+                if delay_s:
+                    time.sleep(delay_s)
+                if not self._microphone_session_is_current(generation):
+                    return
+
+                mic = None
                 try:
-                    handle(wait_for_stop=False)
-                except Exception:
-                    pass
+                    mic = sr.Microphone(device_index=device_index)
+                    source = mic.__enter__()
+                except Exception as e:
+                    last_error = e
+                    print(f"DEBUG: Microphone open failed (will retry): {e}")
+                    self._close_microphone_quietly(mic)
+                    continue
+
+                if not self._microphone_session_is_current(generation):
+                    self._close_microphone_quietly(mic)
+                    return
+
+                stop_event = threading.Event()
+                closed = threading.Event()
+                close_lock = threading.Lock()
+
+                def close_mic():
+                    with close_lock:
+                        if closed.is_set():
+                            return
+                        closed.set()
+                        self._close_microphone_quietly(mic)
+
+                def reader():
+                    try:
+                        chunk_size = getattr(source, "CHUNK", 1024)
+                        while (
+                            not stop_event.is_set()
+                            and self._microphone_session_is_current(generation)
+                        ):
+                            try:
+                                data = source.stream.read(chunk_size)
+                            except Exception as read_error:
+                                if stop_event.is_set() or not self._microphone_session_is_current(generation):
+                                    break
+                                print(f"DEBUG: Microphone read failed: {read_error}")
+                                break
+                            if not data:
+                                continue
+                            if not self._microphone_session_is_current(generation):
+                                break
+                            self.audio_frames.append(data)
+                            if self.current_sample_rate is None:
+                                self.current_sample_rate = source.SAMPLE_RATE
+                                print(f"DEBUG: Sample rate set to {self.current_sample_rate}")
+                            if self.current_sample_width is None:
+                                self.current_sample_width = source.SAMPLE_WIDTH
+                                print(f"DEBUG: Sample width set to {self.current_sample_width}")
+                    finally:
+                        close_mic()
+
+                reader_thread = threading.Thread(target=reader, daemon=True)
+
+                def stop_handle(wait_for_stop=True):
+                    stop_event.set()
+                    try:
+                        pyaudio_stream = getattr(
+                            getattr(source, "stream", None),
+                            "pyaudio_stream",
+                            None,
+                        )
+                        if pyaudio_stream is not None and pyaudio_stream.is_active():
+                            pyaudio_stream.stop_stream()
+                    except Exception:
+                        pass
+                    if wait_for_stop:
+                        reader_thread.join(timeout=1.5)
+                    close_mic()
+
+                reader_thread.start()
+                print("DEBUG: Microphone stream started successfully.")
+                self.comm.microphone_ready.emit(stop_handle, device_index)
                 return
-            print("DEBUG: Background listener started successfully.")
-            self.comm.microphone_ready.emit(handle, device_index)
+
+            if self._microphone_session_is_current(generation):
+                detail = last_error or "device unavailable"
+                self.comm.microphone_failed.emit(
+                    "Microphone is busy. Close other apps using the mic, then tap Listen again."
+                    f"\n\n({detail})"
+                )
         except Exception as e:
             print(f"DEBUG: Exception starting microphone: {e}")
-            self.comm.microphone_failed.emit(f"Error starting microphone: {e}")
+            if self._microphone_session_is_current(generation):
+                self.comm.microphone_failed.emit(
+                    "Microphone is busy. Close other apps using the mic, then tap Listen again."
+                    f"\n\n({e})"
+                )
 
     def _on_microphone_ready(self, handle, device_index):
         if not self.is_recording:
@@ -1761,25 +1849,16 @@ class MainWindow(QMainWindow):
             self.save_settings()
             print(f"DEBUG: Fallback auto-selected microphone index {device_index}")
         self.background_listen_stop_handle = handle
+        if not self._is_button_spinning("record"):
+            self.record_button.setText("Listening...")
 
     def _on_microphone_failed(self, message):
+        if not self.is_recording:
+            return
         self.is_recording = False
         self.record_button.setText("🔴 Listen")
         self.background_listen_stop_handle = None
         self.show_error_message(message)
-
-    def audio_accumulation_callback(self, recognizer, audio_data):
-        """Called by listen_in_background; accumulates audio data."""
-        # print("DEBUG: audio_accumulation_callback triggered.") 
-        if self.is_recording:
-            self.audio_frames.append(audio_data.get_raw_data())
-            if self.current_sample_rate is None:
-                self.current_sample_rate = audio_data.sample_rate
-                print(f"DEBUG: Sample rate set to {self.current_sample_rate}")
-            if self.current_sample_width is None:
-                self.current_sample_width = audio_data.sample_width
-                print(f"DEBUG: Sample width set to {self.current_sample_width}")
-            # print(f"DEBUG: Accumulated audio frame. Total frames: {len(self.audio_frames)}") 
 
     def stop_recording(self):
         if not self.is_recording:
@@ -1790,8 +1869,12 @@ class MainWindow(QMainWindow):
 
         if self.background_listen_stop_handle:
             print("DEBUG: Stopping background listener.")
-            self.background_listen_stop_handle(wait_for_stop=False)
+            handle = self.background_listen_stop_handle
             self.background_listen_stop_handle = None
+            try:
+                handle(wait_for_stop=True)
+            except Exception as e:
+                print(f"DEBUG: Error stopping microphone: {e}")
         
         if self.audio_frames and self.current_sample_rate and self.current_sample_width:
             print(f"DEBUG: Processing {len(self.audio_frames)} accumulated audio frames.")
@@ -1822,6 +1905,7 @@ class MainWindow(QMainWindow):
                 print("DEBUG: Sample rate not set.")
             if not self.current_sample_width:
                 print("DEBUG: Sample width not set.")
+            self.show_status_message("No audio was captured. Try Listen again.")
 
         self.audio_frames = [] # Clear for next recording session
 
