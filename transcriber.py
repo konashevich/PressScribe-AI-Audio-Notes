@@ -143,8 +143,10 @@ class Communicate(QObject):
     import_finished = Signal()
     polish_finished = Signal()
     translate_finished = Signal()
-    microphone_ready = Signal(object, object)  # stop_handle, device_index
+    microphone_ready = Signal(object)  # device_index
+    microphone_got_audio = Signal()
     microphone_failed = Signal(str)
+    microphone_capture_lost = Signal(str)
 
 def copy_text_to_clipboard(text):
     """Copy via Qt clipboard. Avoid pyperclip on Linux — it can hang the UI thread."""
@@ -193,6 +195,242 @@ def resource_path(relative_path):
 
 
 VALID_LISTEN_MODES = ("Click and Hold", "Click and Stick")
+
+# PortAudio overflow/underflow; skip the chunk instead of ending the take.
+_PA_OVERFLOW_ERRNOS = {-9981, -9988, "-9981", "-9988"}
+MIN_LISTEN_SECONDS = 1.0
+# ~21ms at 48 kHz. Small enough that stop_event is noticed quickly when
+# the device is still delivering audio, without the PipeWire callback
+# truncation we saw with stream callbacks on this host.
+_MIC_FRAMES_PER_BUFFER = 1024
+MIC_STALL_SECONDS = 1.5
+MIC_FIRST_AUDIO_STALL_SECONDS = 4.0
+MIC_REOPEN_COOLDOWN_SECONDS = 1.5
+MIC_MAX_REOPENS = 8
+MIC_MAX_EMPTY_REOPENS = 1
+GEMINI_TRANSCRIBE_PROMPT = (
+    "Transcribe this entire audio from beginning to end. "
+    "Return only the spoken words as plain text."
+)
+
+_portaudio_lock = threading.Lock()
+_portaudio_host = None
+
+
+def get_portaudio_host():
+    """One process-wide PortAudio host. Never terminate it on the Listen path."""
+    global _portaudio_host
+    with _portaudio_lock:
+        if _portaudio_host is None:
+            _portaudio_host = pyaudio.PyAudio()
+        return _portaudio_host
+
+
+class MicrophoneCaptureSession:
+    """Capture PCM on one owner thread. Other threads may only set stop_event.
+
+    The UI thread must never join this thread or call PortAudio. Blocking
+    stream.read / stop_stream / terminate can hang on ALSA/PipeWire; waiting
+    for that from Qt is what surfaces the desktop "not responding" dialog
+    and loses the take on force-quit.
+    """
+
+    def __init__(self, device_index, on_first_audio=None):
+        self.device_index = device_index
+        self.stop_event = threading.Event()
+        self._opened = threading.Event()
+        self._thread = None
+        self._lock = threading.Lock()
+        self.frames = []
+        self.sample_rate = None
+        self.sample_width = None
+        self.error = None
+        self.lost_error = None
+        self.opened_at = None
+        self.last_append_at = None
+        self.captured_bytes = 0
+        self._got_audio = False
+        self.on_first_audio = on_first_audio
+
+    def start(self):
+        self._thread = threading.Thread(
+            target=self._run,
+            name="PressScribeMic",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def wait_opened(self, timeout=8.0):
+        return self._opened.wait(timeout)
+
+    def is_running(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def stop(self, wait=False, timeout=0.0):
+        self.stop_event.set()
+        if wait:
+            self.wait_until_finished(timeout=timeout)
+
+    def wait_until_finished(self, timeout=None):
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+
+    def snapshot(self):
+        with self._lock:
+            frames = list(self.frames)
+            rate = self.sample_rate
+            width = self.sample_width
+        return b"".join(frames), rate, width
+
+    def captured_duration_s(self):
+        stats = self.capture_stats()
+        nbytes = stats["captured_bytes"]
+        rate = stats["sample_rate"]
+        width = stats["sample_width"]
+        if not nbytes or not rate or not width:
+            return 0.0
+        return nbytes / float(rate * width)
+
+    def capture_stats(self):
+        with self._lock:
+            return {
+                "captured_bytes": self.captured_bytes,
+                "sample_rate": self.sample_rate,
+                "sample_width": self.sample_width,
+                "opened_at": self.opened_at,
+                "last_append_at": self.last_append_at,
+                "got_audio": self._got_audio,
+            }
+
+    def adopt_pcm(self, raw_audio, sample_rate, sample_width):
+        """Keep PCM from a stalled session when opening a replacement stream.
+
+        Do not stamp last_append_at here. The heartbeat must treat a
+        replacement stream that never appends as stalled, not as live audio.
+        """
+        with self._lock:
+            if raw_audio:
+                self.frames = [raw_audio]
+                self.captured_bytes = len(raw_audio)
+                self._got_audio = True
+            if sample_rate:
+                self.sample_rate = sample_rate
+            if sample_width:
+                self.sample_width = sample_width
+
+    def _append(self, data):
+        if not data:
+            return
+        chunk = bytes(data)
+        first = False
+        with self._lock:
+            self.frames.append(chunk)
+            self.captured_bytes += len(chunk)
+            self.last_append_at = time.monotonic()
+            if not self._got_audio:
+                self._got_audio = True
+                first = True
+        if first and self.on_first_audio is not None:
+            try:
+                self.on_first_audio()
+            except Exception as callback_error:
+                print(f"DEBUG: First-audio callback failed: {callback_error}")
+
+    def _run(self):
+        last_error = None
+        pa = get_portaudio_host()
+        for delay_s in (0.0, 0.12, 0.25, 0.45, 0.80):
+            if self.stop_event.is_set():
+                self._opened.set()
+                return
+            if delay_s:
+                time.sleep(delay_s)
+            if self.stop_event.is_set():
+                self._opened.set()
+                return
+            stream = None
+            try:
+                info = pa.get_device_info_by_index(self.device_index)
+                rate = self.sample_rate or int(info.get("defaultSampleRate") or 16000)
+                width = self.sample_width or pa.get_sample_size(pyaudio.paInt16)
+                stream = pa.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=rate,
+                    input=True,
+                    input_device_index=self.device_index,
+                    frames_per_buffer=_MIC_FRAMES_PER_BUFFER,
+                )
+                self.sample_rate = rate
+                self.sample_width = width
+                self.opened_at = time.monotonic()
+                self._opened.set()
+                print(f"DEBUG: Microphone capture started at {rate} Hz.")
+                self._read_available(stream)
+                return
+            except Exception as e:
+                last_error = e
+                print(f"DEBUG: Microphone open failed (will retry): {e}")
+            finally:
+                # Close after the read loop so the device can be reused on
+                # reconnect. Skip close when the user already stopped: close()
+                # can hold the GIL and freeze Qt, and the take is already snapshotted.
+                if not self.stop_event.is_set():
+                    self._close_stream_quietly(stream)
+        self.error = last_error or RuntimeError("device unavailable")
+        self._opened.set()
+
+    def _close_stream_quietly(self, stream):
+        if stream is None:
+            return
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+    def _read_available(self, stream):
+        """Read only bytes already queued. Never block in stream.read()."""
+        chunk = _MIC_FRAMES_PER_BUFFER
+        last_append = time.monotonic()
+        got_any = self._got_audio
+        while not self.stop_event.is_set():
+            now = time.monotonic()
+            stall_limit = MIC_STALL_SECONDS if got_any else MIC_FIRST_AUDIO_STALL_SECONDS
+            if (now - last_append) >= stall_limit:
+                print("DEBUG: Capture loop stall-exit.")
+                break
+            try:
+                available = int(stream.get_read_available() or 0)
+            except Exception as avail_error:
+                print(f"DEBUG: Microphone available-check failed: {avail_error}")
+                self.lost_error = str(avail_error)
+                break
+            if available <= 0:
+                if self.stop_event.wait(0.02):
+                    break
+                continue
+            try:
+                data = stream.read(min(available, chunk), exception_on_overflow=False)
+            except Exception as read_error:
+                if self.stop_event.is_set():
+                    break
+                errno = getattr(read_error, "errno", None)
+                if errno in _PA_OVERFLOW_ERRNOS:
+                    continue
+                print(f"DEBUG: Microphone read failed: {read_error}")
+                self.lost_error = str(read_error)
+                break
+            if data:
+                self._append(data)
+                last_append = time.monotonic()
+                got_any = True
+
+
+def last_audio_dir():
+    """Single parked recording slot that survives app restarts until replaced or cleared."""
+    path = os.path.join(app_config_dir(), "last_audio")
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def app_config_dir():
@@ -514,22 +752,23 @@ class EditPromptDialog(QDialog):
         return self.prompt_text_edit.toPlainText()
 
 class RecordButton(QPushButton):
-    """A QPushButton that emits signals on mouse press and release for press-and-hold functionality."""
-    pressed = Signal()
-    released = Signal()
+    """Press/release for Click and Hold. Does not shadow QPushButton.pressed/released."""
+    listenPressed = Signal()
+    listenReleased = Signal()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.press_hold_enabled = False
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.pressed.emit()
         super().mousePressEvent(event)
+        if self.press_hold_enabled and event.button() == Qt.LeftButton:
+            self.listenPressed.emit()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.released.emit()
         super().mouseReleaseEvent(event)
+        if self.press_hold_enabled and event.button() == Qt.LeftButton:
+            self.listenReleased.emit()
 
 
 class EditorSplitPane(QWidget):
@@ -840,7 +1079,9 @@ class MainWindow(QMainWindow):
         self.comm.polish_finished.connect(self.finish_polish_processing)
         self.comm.translate_finished.connect(self.finish_translate_processing)
         self.comm.microphone_ready.connect(self._on_microphone_ready)
+        self.comm.microphone_got_audio.connect(self._on_microphone_got_audio)
         self.comm.microphone_failed.connect(self._on_microphone_failed)
+        self.comm.microphone_capture_lost.connect(self._on_microphone_capture_lost)
 
         self.is_recording = False
         self._mic_start_generation = 0
@@ -852,7 +1093,17 @@ class MainWindow(QMainWindow):
         self.audio_frames = []
         self.current_sample_rate = None
         self.current_sample_width = None
-        self.background_listen_stop_handle = None
+        self._mic_session = None
+        self._mic_lingering_session = None
+        self._stopping_recording = False
+        self._listen_started_at = None
+        self._heard_listen_audio = False
+        self._mic_reopen_count = 0
+        self._mic_empty_reopen_count = 0
+        self._last_mic_reopen_at = 0.0
+        self._mic_heartbeat_timer = QTimer(self)
+        self._mic_heartbeat_timer.setInterval(250)
+        self._mic_heartbeat_timer.timeout.connect(self._on_mic_heartbeat)
 
         self.whisper_model = None # Lazy load
         self.spinner_frames = ["◐", "◓", "◑", "◒"]
@@ -867,6 +1118,7 @@ class MainWindow(QMainWindow):
         self.init_ui()
         self.load_saved_notes()
         self.apply_settings() # This will also call _refresh_all_ghost_cursors
+        self._restore_parked_audio()
         self._preload_heavy_deps_async()
 
     def init_ui(self):
@@ -899,21 +1151,31 @@ class MainWindow(QMainWindow):
         editor_layout.setContentsMargins(0, 0, 0, 0)
 
         self.import_strip = QFrame()
+        self.import_strip.setObjectName("import_strip")
         self.import_strip.setFrameShape(QFrame.StyledPanel)
         self.import_strip.setVisible(False)
+        self.import_strip.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.import_strip.setMaximumHeight(40)
         import_layout = QHBoxLayout(self.import_strip)
+        import_layout.setContentsMargins(8, 4, 8, 4)
+        import_layout.setSpacing(8)
         self.import_label = QLabel("No audio imported")
+        self.import_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.import_label.setWordWrap(False)
+        self.import_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.transcribe_import_button = QPushButton("▶ Transcribe")
         self.transcribe_import_button.clicked.connect(self.transcribe_imported_audio)
         self.clear_import_button = QPushButton("Clear")
         self.clear_import_button.clicked.connect(self.clear_imported_audio)
+        for import_button in (self.transcribe_import_button, self.clear_import_button):
+            self._configure_editor_toolbar_button(import_button)
         import_layout.addWidget(self.import_label, stretch=1)
         import_layout.addWidget(self.transcribe_import_button)
         import_layout.addWidget(self.clear_import_button)
-        editor_layout.addWidget(self.import_strip)
+        editor_layout.addWidget(self.import_strip, 0)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        editor_layout.addWidget(splitter)
+        editor_layout.addWidget(splitter, 1)
 
         # Raw Transcription Panel
         raw_panel = EditorSplitPane()
@@ -926,8 +1188,6 @@ class MainWindow(QMainWindow):
         raw_buttons_layout = QHBoxLayout()
         raw_buttons_layout.setSpacing(4)
         self.record_button = RecordButton("🔴 Listen")
-        self.record_button.pressed.connect(self.start_recording)
-        self.record_button.released.connect(self.stop_recording)
 
         self.polish_button = QPushButton("✨ Polish")
         self.polish_button.clicked.connect(self.polish_text)
@@ -1188,7 +1448,7 @@ class MainWindow(QMainWindow):
         # List devices using pyaudio global device indices to catch ALL devices including USB
         first_valid_index = None
         try:
-            p = pyaudio.PyAudio()
+            p = get_portaudio_host()
             for i in range(p.get_device_count()):
                 device_info = p.get_device_info_by_index(i)
                 if device_info.get('maxInputChannels') > 0:
@@ -1208,7 +1468,6 @@ class MainWindow(QMainWindow):
                     # Track the first valid device for auto-selection
                     if first_valid_index is None:
                         first_valid_index = idx
-            p.terminate()
             
             # Auto-select using heuristics if nothing is set (or saved index is invalid)
             if self.settings.get("microphone_index") is None:
@@ -1381,20 +1640,39 @@ class MainWindow(QMainWindow):
         
         # Configure record_button behavior based on listen_mode
         if hasattr(self, 'record_button') and self.record_button:
-            # Disconnect previous connections to avoid multiple calls or wrong behavior
-            try:
-                self.record_button.pressed.disconnect(self.start_recording)
-            except RuntimeError:  # Signal was not connected
-                pass
-            try:
-                self.record_button.released.disconnect(self.stop_recording)
-            except RuntimeError:
-                pass
-            try:
-                self.record_button.clicked.disconnect(self.toggle_recording_stick_mode)
-            except RuntimeError:
-                pass
-            
+            listen_busy = self.is_recording or self._stopping_recording
+            # Never disconnect Listen while a take is in progress: a theme
+            # or settings refresh would swallow the stop click.
+            if not listen_busy:
+                prev_mode = getattr(self, "_listen_wired_mode", None)
+                if prev_mode != listen_mode:
+                    if prev_mode == "Click and Hold":
+                        try:
+                            self.record_button.listenPressed.disconnect(self.start_recording)
+                        except (RuntimeError, TypeError):
+                            pass
+                        try:
+                            self.record_button.listenReleased.disconnect(self.stop_recording)
+                        except (RuntimeError, TypeError):
+                            pass
+                    elif prev_mode == "Click and Stick":
+                        try:
+                            self.record_button.clicked.disconnect(self.toggle_recording_stick_mode)
+                        except (RuntimeError, TypeError):
+                            pass
+
+                    self.record_button.press_hold_enabled = listen_mode == "Click and Hold"
+                    unique = Qt.ConnectionType.UniqueConnection
+                    try:
+                        if listen_mode == "Click and Hold":
+                            self.record_button.listenPressed.connect(self.start_recording, unique)
+                            self.record_button.listenReleased.connect(self.stop_recording, unique)
+                        elif listen_mode == "Click and Stick":
+                            self.record_button.clicked.connect(self.toggle_recording_stick_mode, unique)
+                    except RuntimeError:
+                        pass
+                    self._listen_wired_mode = listen_mode
+
             # Update microphone check state
             current_mic = self.settings.get("microphone_index")
             if hasattr(self, 'mic_group'):
@@ -1403,11 +1681,13 @@ class MainWindow(QMainWindow):
                         action.setChecked(True)
                         break
 
-            if listen_mode == "Click and Hold":
-                self.record_button.pressed.connect(self.start_recording)
-                self.record_button.released.connect(self.stop_recording)
-            elif listen_mode == "Click and Stick":
-                self.record_button.clicked.connect(self.toggle_recording_stick_mode)
+            # Update microphone check state
+            current_mic = self.settings.get("microphone_index")
+            if hasattr(self, 'mic_group'):
+                for action in self.mic_group.actions():
+                    if action.data() == current_mic:
+                        action.setChecked(True)
+                        break
 
         if hasattr(self, "auto_save_notes_action"):
             self.auto_save_notes_action.setChecked(bool(self.settings.get("auto_save_notes", True)))
@@ -1518,7 +1798,7 @@ class MainWindow(QMainWindow):
     def get_best_microphone_index(self):
         """Heuristics to find the best available microphone (e.g., USB) if default fails."""
         try:
-            p = pyaudio.PyAudio()
+            p = get_portaudio_host()
             best_index = None
             best_score = -500 # Set low starting score
             
@@ -1549,7 +1829,6 @@ class MainWindow(QMainWindow):
                     if score > best_score:
                         best_score = score
                         best_index = i
-            p.terminate()
             
             if best_index is not None and best_score > -500:
                 print(f"DEBUG: Result - Auto-selected index {best_index} (Score {best_score})")
@@ -1620,19 +1899,26 @@ class MainWindow(QMainWindow):
                 os.remove(pending)
             except OSError:
                 pass
+            if self.imported_audio_path is None:
+                self._clear_parked_audio_files()
         self._set_import_controls_enabled(True)
         if hasattr(self, "transcribe_import_button"):
             self.transcribe_import_button.setText("▶ Transcribe")
+        if self._is_button_spinning("record"):
+            self.finish_record_processing()
         self._refresh_all_ghost_cursors()
 
     def closeEvent(self, event):
+        self._stop_mic_heartbeat()
+        if self._mic_session is not None:
+            self._mic_session.stop(wait=False)
+            self._mic_session = None
+        if self._mic_lingering_session is not None:
+            self._mic_lingering_session.stop(wait=False)
+            self._mic_lingering_session = None
         self.save_settings()
         if self._notes_persist_timer.isActive():
             self._flush_saved_notes()
-        if not self.is_import_transcribing:
-            self.clear_imported_audio(delete_only=True)
-        else:
-            self._pending_import_delete = self.imported_audio_path
         super().closeEvent(event)
 
     def _set_import_controls_enabled(self, enabled):
@@ -1644,6 +1930,7 @@ class MainWindow(QMainWindow):
     def _is_audio_busy(self):
         return (
             self.is_recording
+            or self._stopping_recording
             or self.is_import_transcribing
             or self._is_button_spinning("record")
         )
@@ -1688,226 +1975,376 @@ class MainWindow(QMainWindow):
                 "Choose a Listen mode in Settings (Click and Hold or Click and Stick) before recording."
             )
             return
-        if self.is_recording or self._is_button_spinning("record") or self.is_import_transcribing:
+        if (
+            self.is_recording
+            or self._stopping_recording
+            or self._is_button_spinning("record")
+            or self.is_import_transcribing
+        ):
             if self.is_import_transcribing:
                 self.show_status_message("Wait for the imported audio transcription to finish.")
             return
+        lingering = self._mic_lingering_session
+        if lingering is not None:
+            lingering.stop(wait=False)
+            self._mic_lingering_session = None
         self.is_recording = True
         self._mic_start_generation += 1
         generation = self._mic_start_generation
+        self._listen_started_at = time.monotonic()
+        self._heard_listen_audio = False
+        self._mic_reopen_count = 0
+        self._mic_empty_reopen_count = 0
+        self._last_mic_reopen_at = 0.0
         self.record_button.setText("Starting...")
+        self.statusBar().showMessage("Waiting for microphone…")
         
         self.audio_frames = [] # Clear previous frames
         self.current_sample_rate = None
         self.current_sample_width = None
 
         device_index = self.settings.get("microphone_index")
+        session = self._new_capture_session(device_index)
+        self._mic_session = session
         print(f"DEBUG: Starting background listener for audio accumulation. Device Index Setting: {device_index}")
+        self._mic_heartbeat_timer.start()
         threading.Thread(
             target=self._start_microphone_worker,
-            args=(device_index, generation),
+            args=(session, device_index, generation),
             daemon=True,
         ).start()
 
-    def _microphone_session_is_current(self, generation):
-        return generation == self._mic_start_generation and self.is_recording
+    def _new_capture_session(self, device_index):
+        return MicrophoneCaptureSession(
+            device_index,
+            on_first_audio=self.comm.microphone_got_audio.emit,
+        )
 
-    def _close_microphone_quietly(self, mic):
-        if mic is None:
-            return
+    def _start_microphone_worker(self, session, device_index, generation):
+        """Open the mic off the UI thread and keep one capture session for the whole Listen take."""
         try:
-            mic.__exit__(None, None, None)
-        except Exception:
-            pass
-
-    def _start_microphone_worker(self, device_index, generation):
-        """Open the mic off the UI thread and keep the stream open for the whole Listen session."""
-        last_error = None
-        try:
+            if session.stop_event.is_set() or generation != self._mic_start_generation or not self.is_recording:
+                return
             if device_index is None:
                 device_index = self.get_best_microphone_index()
+                session.device_index = device_index
             if device_index is None:
-                if self._microphone_session_is_current(generation):
+                if (
+                    generation == self._mic_start_generation
+                    and self.is_recording
+                    and not session.stop_event.is_set()
+                ):
                     self.comm.microphone_failed.emit(
                         "No microphone selected. Please select one in Settings > Microphone."
                     )
                 return
-
-            # Other apps (browser, chat, etc.) often hold the ALSA/PipeWire capture
-            # device for a moment after they stop. Opening, closing, and reopening
-            # the same device — as ambient-adjust + listen_in_background used to —
-            # fails immediately on this Linux setup. Retry the same device instead.
-            retry_delays_s = (0.0, 0.08, 0.16, 0.28, 0.45, 0.70)
-            for delay_s in retry_delays_s:
-                if not self._microphone_session_is_current(generation):
-                    return
-                if delay_s:
-                    time.sleep(delay_s)
-                if not self._microphone_session_is_current(generation):
-                    return
-
-                mic = None
-                try:
-                    mic = sr.Microphone(device_index=device_index)
-                    source = mic.__enter__()
-                except Exception as e:
-                    last_error = e
-                    print(f"DEBUG: Microphone open failed (will retry): {e}")
-                    self._close_microphone_quietly(mic)
-                    continue
-
-                if not self._microphone_session_is_current(generation):
-                    self._close_microphone_quietly(mic)
-                    return
-
-                stop_event = threading.Event()
-                closed = threading.Event()
-                close_lock = threading.Lock()
-
-                def close_mic():
-                    with close_lock:
-                        if closed.is_set():
-                            return
-                        closed.set()
-                        self._close_microphone_quietly(mic)
-
-                def reader():
-                    try:
-                        chunk_size = getattr(source, "CHUNK", 1024)
-                        while (
-                            not stop_event.is_set()
-                            and self._microphone_session_is_current(generation)
-                        ):
-                            try:
-                                data = source.stream.read(chunk_size)
-                            except Exception as read_error:
-                                if stop_event.is_set() or not self._microphone_session_is_current(generation):
-                                    break
-                                print(f"DEBUG: Microphone read failed: {read_error}")
-                                break
-                            if not data:
-                                continue
-                            if not self._microphone_session_is_current(generation):
-                                break
-                            self.audio_frames.append(data)
-                            if self.current_sample_rate is None:
-                                self.current_sample_rate = source.SAMPLE_RATE
-                                print(f"DEBUG: Sample rate set to {self.current_sample_rate}")
-                            if self.current_sample_width is None:
-                                self.current_sample_width = source.SAMPLE_WIDTH
-                                print(f"DEBUG: Sample width set to {self.current_sample_width}")
-                    finally:
-                        close_mic()
-
-                reader_thread = threading.Thread(target=reader, daemon=True)
-
-                def stop_handle(wait_for_stop=True):
-                    stop_event.set()
-                    try:
-                        pyaudio_stream = getattr(
-                            getattr(source, "stream", None),
-                            "pyaudio_stream",
-                            None,
-                        )
-                        if pyaudio_stream is not None and pyaudio_stream.is_active():
-                            pyaudio_stream.stop_stream()
-                    except Exception:
-                        pass
-                    if wait_for_stop:
-                        reader_thread.join(timeout=1.5)
-                    close_mic()
-
-                reader_thread.start()
-                print("DEBUG: Microphone stream started successfully.")
-                self.comm.microphone_ready.emit(stop_handle, device_index)
+            if session.stop_event.is_set() or generation != self._mic_start_generation or not self.is_recording:
                 return
 
-            if self._microphone_session_is_current(generation):
-                detail = last_error or "device unavailable"
-                self.comm.microphone_failed.emit(
-                    "Microphone is busy. Close other apps using the mic, then tap Listen again."
-                    f"\n\n({detail})"
-                )
+            session.start()
+            opened = session.wait_opened(timeout=8.0)
+            if session.stop_event.is_set() or generation != self._mic_start_generation or not self.is_recording:
+                session.stop(wait=False)
+                return
+            if not opened or session.error is not None:
+                detail = session.error or "device unavailable"
+                keep_audio = session.captured_bytes > 0
+                session.stop(wait=False)
+                if keep_audio:
+                    print(
+                        "DEBUG: Replacement microphone stream failed; keeping audio already captured."
+                    )
+                    return
+                if generation == self._mic_start_generation and self.is_recording:
+                    self.comm.microphone_failed.emit(
+                        "Microphone is busy. Close other apps using the mic, then tap Listen again."
+                        f"\n\n({detail})"
+                    )
+                return
+
+            self.comm.microphone_ready.emit(device_index)
+            # Stay on this worker until the owner thread ends. Never join it
+            # from Qt. No short timeout: a long take is still one session.
+            session.wait_until_finished()
+            if (
+                session.lost_error
+                and generation == self._mic_start_generation
+                and self.is_recording
+                and not session.stop_event.is_set()
+            ):
+                self.comm.microphone_capture_lost.emit(session.lost_error)
         except Exception as e:
             print(f"DEBUG: Exception starting microphone: {e}")
-            if self._microphone_session_is_current(generation):
+            keep_audio = session.captured_bytes > 0
+            session.stop(wait=False)
+            if keep_audio:
+                return
+            if generation == self._mic_start_generation and self.is_recording:
                 self.comm.microphone_failed.emit(
                     "Microphone is busy. Close other apps using the mic, then tap Listen again."
                     f"\n\n({e})"
                 )
 
-    def _on_microphone_ready(self, handle, device_index):
-        if not self.is_recording:
-            try:
-                if handle is not None:
-                    handle(wait_for_stop=False)
-            except Exception:
-                pass
+    def _on_microphone_ready(self, device_index):
+        if not self.is_recording or self._stopping_recording:
+            session = self._mic_session
+            if not self.is_recording:
+                self._mic_session = None
+                if session is not None:
+                    session.stop(wait=False)
             return
         if self.settings.get("microphone_index") is None and device_index is not None:
             self.settings["microphone_index"] = device_index
             self.save_settings()
             print(f"DEBUG: Fallback auto-selected microphone index {device_index}")
-        self.background_listen_stop_handle = handle
+        session = self._mic_session
+        already_has_audio = self._heard_listen_audio or (
+            session is not None and session.captured_bytes > 0
+        )
+        if already_has_audio:
+            self._heard_listen_audio = True
+            self._show_listening_button()
+        elif not self._is_button_spinning("record"):
+            self.record_button.setText("Starting...")
+
+    def _on_microphone_got_audio(self):
+        if not self.is_recording or self._stopping_recording:
+            return
+        self._heard_listen_audio = True
+        self._show_listening_button()
+
+    def _show_listening_button(self):
         if not self._is_button_spinning("record"):
             self.record_button.setText("Listening...")
 
+    def _listen_wall_s(self):
+        if self._listen_started_at is None:
+            return 0.0
+        return time.monotonic() - self._listen_started_at
+
+    def _stop_mic_heartbeat(self):
+        if self._mic_heartbeat_timer.isActive():
+            self._mic_heartbeat_timer.stop()
+
+    def _on_mic_heartbeat(self):
+        if not self.is_recording or self._stopping_recording:
+            self._stop_mic_heartbeat()
+            return
+        session = self._mic_session
+        if session is None:
+            return
+        duration_s = session.captured_duration_s()
+        if duration_s > 0:
+            self._heard_listen_audio = True
+            self._show_listening_button()
+            self.statusBar().showMessage(f"Listening… {duration_s:.1f}s")
+        else:
+            self.statusBar().showMessage("Waiting for microphone…")
+        self._maybe_reopen_stalled_capture(session)
+
+    def _maybe_reopen_stalled_capture(self, session):
+        now = time.monotonic()
+        if now - self._last_mic_reopen_at < MIC_REOPEN_COOLDOWN_SECONDS:
+            return
+        if self._mic_reopen_count >= MIC_MAX_REOPENS:
+            return
+        if session.is_running():
+            # A live reader may still hold the device. Opening another stream
+            # on top of it is what produced empty long takes on this host.
+            return
+        stats = session.capture_stats()
+        captured_bytes = stats["captured_bytes"]
+        if captured_bytes == 0 and self._mic_empty_reopen_count >= MIC_MAX_EMPTY_REOPENS:
+            return
+        opened_at = stats["opened_at"]
+        last_append = stats["last_append_at"]
+        stream_dead = session.error is not None or session.stop_event.is_set()
+        if not stream_dead:
+            if opened_at is None:
+                return
+            if captured_bytes == 0:
+                stalled = (now - opened_at) >= MIC_FIRST_AUDIO_STALL_SECONDS
+            elif last_append is None:
+                # Adopted PCM from a prior stream; this replacement has not
+                # appended yet. Do not wait on a stamp from adopt time.
+                stalled = (now - opened_at) >= MIC_STALL_SECONDS
+            else:
+                stalled = (now - last_append) >= MIC_STALL_SECONDS
+            if not stalled:
+                return
+        print("DEBUG: Capture stalled; reopening microphone stream.")
+        self.statusBar().showMessage("Microphone stalled, reconnecting…")
+        self._reopen_stalled_capture()
+
+    def _reopen_stalled_capture(self):
+        if not self.is_recording or self._stopping_recording:
+            return
+        old = self._mic_session
+        if old is None:
+            return
+        raw_audio, sample_rate, sample_width = old.snapshot()
+        old.stop(wait=False)
+        if self._mic_lingering_session is not None:
+            self._mic_lingering_session.stop(wait=False)
+        self._mic_lingering_session = old
+        device_index = old.device_index
+        session = self._new_capture_session(device_index)
+        session.adopt_pcm(raw_audio, sample_rate, sample_width)
+        self._mic_session = session
+        self._mic_reopen_count += 1
+        if not raw_audio:
+            self._mic_empty_reopen_count += 1
+        self._last_mic_reopen_at = time.monotonic()
+        generation = self._mic_start_generation
+        threading.Thread(
+            target=self._start_microphone_worker,
+            args=(session, device_index, generation),
+            daemon=True,
+        ).start()
+
     def _on_microphone_failed(self, message):
-        if not self.is_recording:
+        if not self.is_recording or self._stopping_recording:
+            return
+        session = self._mic_session
+        if session is not None and session.captured_bytes > 0:
+            print("DEBUG: Ignoring microphone error; audio was already captured.")
+            self.statusBar().showMessage(
+                "Microphone reconnect failed. Stop Listen to transcribe what was captured."
+            )
             return
         self.is_recording = False
+        self._stop_mic_heartbeat()
         self.record_button.setText("🔴 Listen")
-        self.background_listen_stop_handle = None
+        self._mic_session = None
+        if session is not None:
+            session.stop(wait=False)
         self.show_error_message(message)
 
-    def stop_recording(self):
-        if not self.is_recording:
-            return # Already stopped or was never started properly
-        self.is_recording = False # Signal that recording should stop accumulation
-        self._mic_start_generation += 1  # Cancel any in-flight mic startup
-        self.record_button.setText("🔴 Listen")
+    def _on_microphone_capture_lost(self, message):
+        if not self.is_recording or self._stopping_recording:
+            return
+        print(f"DEBUG: Microphone capture lost: {message}")
+        session = self._mic_session
+        has_audio = session is not None and session.captured_bytes > 0
+        can_retry_empty = self._mic_empty_reopen_count < MIC_MAX_EMPTY_REOPENS
+        if (has_audio or can_retry_empty) and self._mic_reopen_count < MIC_MAX_REOPENS:
+            self.statusBar().showMessage("Microphone stalled, reconnecting…")
+            self._reopen_stalled_capture()
+            return
+        self.show_status_message("Microphone stopped unexpectedly. Transcribing what was captured.")
+        self.stop_recording()
 
-        if self.background_listen_stop_handle:
-            print("DEBUG: Stopping background listener.")
-            handle = self.background_listen_stop_handle
-            self.background_listen_stop_handle = None
+    def _pcm_duration_s(self, raw_audio, sample_rate, sample_width):
+        if not raw_audio or not sample_rate or not sample_width:
+            return 0.0
+        return len(raw_audio) / float(sample_rate * sample_width)
+
+    def _merge_listen_pcm(self, primary, lingering):
+        """Keep the longer consistent PCM when a stalled reader was abandoned."""
+        raw_audio, sample_rate, sample_width = primary
+        if lingering is None:
+            return primary
+        old_raw, old_rate, old_width = lingering.snapshot()
+        if not old_raw:
+            return primary
+        if not raw_audio:
+            return (old_raw, old_rate or sample_rate, old_width or sample_width)
+        if old_rate and sample_rate and old_rate != sample_rate:
+            if len(old_raw) > len(raw_audio):
+                return (old_raw, old_rate, old_width)
+            return primary
+        if raw_audio.startswith(old_raw):
+            return primary
+        if old_raw.startswith(raw_audio):
+            return (old_raw, old_rate or sample_rate, old_width or sample_width)
+        if len(old_raw) > len(raw_audio):
+            return (old_raw, old_rate or sample_rate, old_width or sample_width)
+        return primary
+
+    def stop_recording(self):
+        if not self.is_recording or self._stopping_recording:
+            return
+        self._stopping_recording = True
+        self.is_recording = False
+        self._mic_start_generation += 1
+        self._stop_mic_heartbeat()
+        wall_s = self._listen_wall_s()
+        try:
+            session = self._mic_session
+            self._mic_session = None
+            if session is None:
+                self.record_button.setText("🔴 Listen")
+                if wall_s < MIN_LISTEN_SECONDS:
+                    self.show_status_message("Recording too short. Ignored.")
+                else:
+                    self.show_status_message(
+                        "Microphone delivered no audio. Check the selected mic and try Listen again."
+                    )
+                return
+
+            print("DEBUG: Stopping microphone capture.")
+            # Copy PCM first, then ask the audio thread to stop. Never join
+            # PortAudio from Qt: stream.read/stop_stream/terminate can hang
+            # on this host, which is the desktop "not responding" freeze.
+            raw_audio, sample_rate, sample_width = session.snapshot()
+            lingering = self._mic_lingering_session
             try:
-                handle(wait_for_stop=True)
+                session.stop(wait=False)
             except Exception as e:
-                print(f"DEBUG: Error stopping microphone: {e}")
-        
-        if self.audio_frames and self.current_sample_rate and self.current_sample_width:
-            print(f"DEBUG: Processing {len(self.audio_frames)} accumulated audio frames.")
-            complete_raw_audio = b"".join(self.audio_frames)
-            complete_audio_data = sr.AudioData(
-                complete_raw_audio, 
-                self.current_sample_rate, 
-                self.current_sample_width
+                print(f"DEBUG: Error signalling microphone stop: {e}")
+            raw_audio, sample_rate, sample_width = self._merge_listen_pcm(
+                (raw_audio, sample_rate, sample_width), lingering
             )
-            
+            raw_audio, sample_rate, sample_width = self._merge_listen_pcm(
+                (raw_audio, sample_rate, sample_width), session
+            )
+            self._mic_lingering_session = session
+
+            self.audio_frames = []
+            self.current_sample_rate = sample_rate
+            self.current_sample_width = sample_width
+            duration_s = self._pcm_duration_s(raw_audio, sample_rate, sample_width)
+            print(
+                f"DEBUG: Stop listen wall={wall_s:.1f}s pcm={duration_s:.1f}s "
+                f"bytes={len(raw_audio) if raw_audio else 0}."
+            )
+
+            if duration_s <= 0:
+                self.record_button.setText("🔴 Listen")
+                if wall_s < MIN_LISTEN_SECONDS:
+                    self.show_status_message("Recording too short. Ignored.")
+                else:
+                    self.show_status_message(
+                        "Microphone delivered no audio. Check the selected mic and try Listen again."
+                    )
+                return
+
+            if duration_s < MIN_LISTEN_SECONDS and wall_s < MIN_LISTEN_SECONDS:
+                print("DEBUG: Recording shorter than 1s; treating as a failed attempt.")
+                self.record_button.setText("🔴 Listen")
+                self.show_status_message("Recording too short. Ignored.")
+                return
+
+            try:
+                wav_bytes = sr.AudioData(raw_audio, sample_rate, sample_width).get_wav_data()
+                display_name = f"Last recording ({duration_s:.1f}s)"
+                self._park_audio_bytes(wav_bytes, "last_recording.wav", display_name)
+            except Exception as park_error:
+                print(f"DEBUG: Failed to park last recording: {park_error}")
+                self.record_button.setText("🔴 Listen")
+                self.show_error_message(f"Could not save the last recording: {park_error}")
+                return
+
             transcription_service = self.get_effective_transcription_service()
             if transcription_service == "Gemini" and not self.settings.get("api_key"):
                 self.set_api_key()
                 if not self.settings.get("api_key"):
-                    self.audio_frames = []
+                    self.record_button.setText("🔴 Listen")
                     return
-            self.start_record_processing()
-            threading.Thread(
-                target=self.process_audio_with_fallbacks,
-                args=(complete_audio_data, transcription_service),
-                daemon=True,
-            ).start()
-        else:
-            print("DEBUG: No audio frames to process or missing audio parameters.")
-            if not self.audio_frames:
-                print("DEBUG: Audio frames list is empty.")
-            if not self.current_sample_rate:
-                print("DEBUG: Sample rate not set.")
-            if not self.current_sample_width:
-                print("DEBUG: Sample width not set.")
-            self.show_status_message("No audio was captured. Try Listen again.")
-
-        self.audio_frames = [] # Clear for next recording session
+            self.show_status_message(f"Transcribing {duration_s:.1f}s of audio...")
+            self.transcribe_imported_audio(from_listen=True)
+        finally:
+            self._stopping_recording = False
 
     def get_effective_transcription_service(self):
         if GEMINI_ONLY_UI:
@@ -2009,6 +2446,80 @@ class MainWindow(QMainWindow):
             raise RuntimeError("Qwen 3 ASR server returned an empty transcription.")
         return text
 
+    def _gemini_file_state_name(self, audio_file):
+        state = getattr(audio_file, "state", None)
+        if state is None:
+            return ""
+        if isinstance(state, int):
+            return {0: "UNSPECIFIED", 1: "PROCESSING", 2: "ACTIVE", 10: "FAILED"}.get(
+                state, str(state)
+            )
+        name = getattr(state, "name", None) or str(state)
+        text = str(name).upper().rsplit(".", 1)[-1].replace("STATE_", "")
+        if text in ("FAILED", "PROCESSING", "ACTIVE", "UNSPECIFIED"):
+            return text
+        if "FAILED" in text:
+            return "FAILED"
+        if "PROCESSING" in text:
+            return "PROCESSING"
+        if text.endswith("ACTIVE"):
+            return "ACTIVE"
+        return text
+
+    def _gemini_response_text(self, response):
+        finish = ""
+        try:
+            candidate = (getattr(response, "candidates", None) or [None])[0]
+            reason = getattr(candidate, "finish_reason", None)
+            finish = str(getattr(reason, "name", reason) or "").upper()
+        except Exception:
+            finish = ""
+        if "MAX_TOKEN" in finish:
+            raise RuntimeError(
+                "Gemini stopped before finishing the transcript. Tap Transcribe to retry."
+            )
+        try:
+            text = getattr(response, "text", "").strip()
+        except Exception as response_error:
+            raise RuntimeError(safe_error_text(response_error)) from response_error
+        if not text:
+            raise RuntimeError("Gemini returned an empty transcription.")
+        return text
+
+    def _wait_for_gemini_file_active(self, genai, audio_file, timeout_s=180.0):
+        current = audio_file
+        deadline = time.time() + timeout_s
+        notified = False
+        while True:
+            state = self._gemini_file_state_name(current)
+            print(f"DEBUG: Gemini uploaded file state={state or 'unknown'}")
+            if state == "FAILED":
+                raise RuntimeError("Gemini failed to process the uploaded audio.")
+            if state == "ACTIVE":
+                return current
+            if state == "PROCESSING" and not notified:
+                self.comm.status.emit("Waiting for Gemini to finish processing the audio...")
+                notified = True
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    "Gemini is still processing the uploaded audio. Tap Transcribe to retry."
+                )
+            time.sleep(0.5)
+            name = getattr(current, "name", None)
+            if not name:
+                continue
+            getter = getattr(genai, "get_file", None)
+            if getter is None:
+                continue
+            try:
+                current = getter(name)
+            except Exception as refresh_error:
+                print(f"DEBUG: Gemini get_file failed: {refresh_error}")
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        "Gemini is still processing the uploaded audio. Tap Transcribe to retry."
+                    ) from refresh_error
+
     def _transcribe_with_gemini(self, audio_data_to_recognize):
         api_key = self.settings.get("api_key", "").strip()
         if not api_key:
@@ -2025,14 +2536,12 @@ class MainWindow(QMainWindow):
             audio_buffer = io.BytesIO(wav_data)
             audio_buffer.name = "recording.wav"
             audio_file = genai.upload_file(audio_buffer, mime_type="audio/wav", display_name="recording.wav")
-            response = model.generate_content([
-                "Transcribe this audio. Return only the spoken words as plain text.",
-                audio_file,
-            ])
-            text = getattr(response, "text", "").strip()
-            if not text:
-                raise RuntimeError("Gemini returned an empty transcription.")
-            return text
+            audio_file = self._wait_for_gemini_file_active(genai, audio_file)
+            response = model.generate_content(
+                [GEMINI_TRANSCRIBE_PROMPT, audio_file],
+                generation_config={"max_output_tokens": 8192, "temperature": 0},
+            )
+            return self._gemini_response_text(response)
         finally:
             if audio_file is not None:
                 try:
@@ -2829,6 +3338,99 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
+    def _parked_meta_path(self):
+        return os.path.join(last_audio_dir(), "meta.json")
+
+    def _clear_parked_audio_files(self, keep_path=None):
+        directory = last_audio_dir()
+        for name in os.listdir(directory):
+            path = os.path.join(directory, name)
+            if keep_path and os.path.abspath(path) == os.path.abspath(keep_path):
+                continue
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError:
+                pass
+        previous = getattr(self, "imported_audio_path", None)
+        if (
+            previous
+            and previous != keep_path
+            and os.path.exists(previous)
+        ):
+            parked_root = os.path.abspath(directory)
+            if os.path.abspath(previous).startswith(parked_root + os.sep):
+                return
+            try:
+                os.remove(previous)
+            except OSError:
+                pass
+
+    def _write_parked_meta(self, display_name):
+        try:
+            with open(self._parked_meta_path(), "w", encoding="utf-8") as handle:
+                json.dump({"display_name": display_name}, handle)
+        except OSError as e:
+            print(f"DEBUG: Failed to write parked audio metadata: {e}")
+
+    def _show_parked_audio(self, target, display_name):
+        self.imported_audio_path = target
+        self.imported_audio_name = display_name
+        if hasattr(self, "import_label"):
+            self.import_label.setText(display_name)
+            self.import_strip.setVisible(True)
+
+    def _atomic_write_bytes(self, target, data):
+        directory = os.path.dirname(target)
+        os.makedirs(directory, exist_ok=True)
+        tmp = target + ".tmp"
+        with open(tmp, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+
+    def _park_audio_bytes(self, wav_bytes, filename, display_name):
+        target = os.path.join(last_audio_dir(), filename)
+        self._atomic_write_bytes(target, wav_bytes)
+        self._clear_parked_audio_files(keep_path=target)
+        self._write_parked_meta(display_name)
+        self._show_parked_audio(target, display_name)
+        return target
+
+    def _park_audio_file(self, source_path, display_name):
+        ext = os.path.splitext(source_path)[1] or ".audio"
+        target = os.path.join(last_audio_dir(), f"last_audio{ext}")
+        tmp = target + ".tmp"
+        shutil.copy2(source_path, tmp)
+        os.replace(tmp, target)
+        self._clear_parked_audio_files(keep_path=target)
+        self._write_parked_meta(display_name)
+        self._show_parked_audio(target, display_name)
+        return target
+
+    def _restore_parked_audio(self):
+        directory = last_audio_dir()
+        display_name = "Last audio"
+        meta_path = self._parked_meta_path()
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as handle:
+                    meta = json.load(handle)
+                display_name = meta.get("display_name") or display_name
+            except Exception:
+                pass
+        audio_path = None
+        for name in os.listdir(directory):
+            if name == "meta.json" or name.endswith(".tmp"):
+                continue
+            path = os.path.join(directory, name)
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                audio_path = path
+                break
+        if audio_path:
+            self._show_parked_audio(audio_path, display_name)
+
     def open_audio_file(self):
         if self._is_audio_busy():
             self.show_status_message("Wait for the current audio operation to finish before importing another file.")
@@ -2843,19 +3445,7 @@ class MainWindow(QMainWindow):
             return
         try:
             display_name = os.path.basename(filepath)
-            safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in display_name.lower())
-            target = os.path.join(self.imports_dir, f"{int(datetime.now().timestamp() * 1000)}_{safe_name}")
-            shutil.copy2(filepath, target)
-            previous = self.imported_audio_path
-            self.imported_audio_path = target
-            self.imported_audio_name = display_name
-            if previous and previous != target and os.path.exists(previous):
-                try:
-                    os.remove(previous)
-                except OSError:
-                    pass
-            self.import_label.setText(f"Imported: {display_name}")
-            self.import_strip.setVisible(True)
+            self._park_audio_file(filepath, display_name)
             self.show_main_view(0)
             self.show_status_message(f"{display_name} is ready.")
             self.transcribe_imported_audio()
@@ -2866,32 +3456,32 @@ class MainWindow(QMainWindow):
         if self.is_import_transcribing and not delete_only:
             self.show_status_message("Wait for the current transcription to finish before clearing.")
             return
-        if self.is_import_transcribing and delete_only:
-            # Called from closeEvent: mark for delete after finish if needed
-            pass
         path = self.imported_audio_path
         self.imported_audio_path = None
         self.imported_audio_name = None
         if not delete_only and hasattr(self, "import_strip"):
             self.import_strip.setVisible(False)
             self.import_label.setText("No audio imported")
-        if path and os.path.exists(path) and not self.is_import_transcribing:
+        if self.is_import_transcribing:
+            self._pending_import_delete = path
+            return
+        self._clear_parked_audio_files()
+        if path and os.path.exists(path):
             try:
                 os.remove(path)
             except OSError:
                 pass
-        elif path and self.is_import_transcribing:
-            # Defer delete until import finishes
-            self._pending_import_delete = path
 
-    def transcribe_imported_audio(self):
+    def transcribe_imported_audio(self, from_listen=False):
         if not self.imported_audio_path or not os.path.exists(self.imported_audio_path):
             self.show_status_message("No audio file is loaded.")
             return
-        if self._is_audio_busy():
+        if self._is_audio_busy() and not from_listen:
             self.show_status_message("Wait for the current audio operation to finish.")
             return
 
+        if from_listen:
+            self.start_record_processing()
         self.start_import_processing()
         path = self.imported_audio_path
         primary = self.get_effective_transcription_service()
@@ -2900,14 +3490,16 @@ class MainWindow(QMainWindow):
             self.set_api_key()
             if not self.settings.get("api_key"):
                 return
+            if from_listen:
+                self.start_record_processing()
             self.start_import_processing()
         threading.Thread(
             target=self.process_imported_audio_file,
-            args=(path, primary),
+            args=(path, primary, from_listen),
             daemon=True,
         ).start()
 
-    def process_imported_audio_file(self, filepath, primary_service):
+    def process_imported_audio_file(self, filepath, primary_service, from_listen=False):
         attempt_order = self.get_transcription_fallback_order(primary_service)
         failures = []
         try:
@@ -2920,7 +3512,10 @@ class MainWindow(QMainWindow):
                         text = self._transcribe_with_google(audio_data)
                     else:
                         text = self._transcribe_file_with_service(filepath, service_name)
-                    self.comm.import_text_ready.emit(text)
+                    if from_listen:
+                        self.comm.text_ready.emit(text + " ")
+                    else:
+                        self.comm.import_text_ready.emit(text)
                     self.comm.status.emit("Transcription added to Raw Transcription.")
                     safe_debug(f"DEBUG: Import transcription via {service_name} succeeded.")
                     return
@@ -2940,6 +3535,13 @@ class MainWindow(QMainWindow):
             return None
 
     def _guess_audio_mime(self, filepath):
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext == ".wav":
+            return "audio/wav"
+        if ext == ".mp3":
+            return "audio/mpeg"
+        if ext in (".m4a", ".aac"):
+            return "audio/mp4"
         mime, _ = mimetypes.guess_type(filepath)
         return mime or "application/octet-stream"
 
@@ -2999,14 +3601,12 @@ class MainWindow(QMainWindow):
         audio_file = None
         try:
             audio_file = genai.upload_file(filepath, mime_type=mime)
-            response = model.generate_content([
-                "Transcribe this audio. Return only the spoken words as plain text.",
-                audio_file,
-            ])
-            text = getattr(response, "text", "").strip()
-            if not text:
-                raise RuntimeError("Gemini returned an empty transcription.")
-            return text
+            audio_file = self._wait_for_gemini_file_active(genai, audio_file)
+            response = model.generate_content(
+                [GEMINI_TRANSCRIBE_PROMPT, audio_file],
+                generation_config={"max_output_tokens": 8192, "temperature": 0},
+            )
+            return self._gemini_response_text(response)
         finally:
             if audio_file is not None:
                 try:
@@ -3110,6 +3710,8 @@ class MainWindow(QMainWindow):
             self._show_ghost_cursor(self.polished_text_area, self.cursor_positions["polished_text_area"])
 
     def toggle_recording_stick_mode(self):
+        if self._stopping_recording or self._is_button_spinning("record"):
+            return
         if self.is_recording:
             self.stop_recording()
         else:
