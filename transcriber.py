@@ -260,7 +260,7 @@ class MicrophoneCaptureSession:
         )
         self._thread.start()
 
-    def wait_opened(self, timeout=8.0):
+    def wait_opened(self, timeout=14.0):
         return self._opened.wait(timeout)
 
     def is_running(self):
@@ -339,7 +339,9 @@ class MicrophoneCaptureSession:
     def _run(self):
         last_error = None
         pa = get_portaudio_host()
-        for delay_s in (0.0, 0.12, 0.25, 0.45, 0.80):
+        # Include a longer pause so a previous take can finish releasing the
+        # exclusive PipeWire/ALSA stream before we try again.
+        for delay_s in (0.0, 0.12, 0.25, 0.45, 0.80, 1.6, 3.0):
             if self.stop_event.is_set():
                 self._opened.set()
                 return
@@ -372,11 +374,12 @@ class MicrophoneCaptureSession:
                 last_error = e
                 print(f"DEBUG: Microphone open failed (will retry): {e}")
             finally:
-                # Close after the read loop so the device can be reused on
-                # reconnect. Skip close when the user already stopped: close()
-                # can hold the GIL and freeze Qt, and the take is already snapshotted.
-                if not self.stop_event.is_set():
-                    self._close_stream_quietly(stream)
+                # Always close after the read loop returns. Skipping close on
+                # user stop left the exclusive stream open, so a later Listen
+                # failed with PortAudio -9985 until the process was restarted.
+                # Close runs on this owner thread after polling has stopped,
+                # never from Qt.
+                self._close_stream_quietly(stream)
         self.error = last_error or RuntimeError("device unavailable")
         self._opened.set()
 
@@ -2010,7 +2013,7 @@ class MainWindow(QMainWindow):
         self._mic_heartbeat_timer.start()
         threading.Thread(
             target=self._start_microphone_worker,
-            args=(session, device_index, generation),
+            args=(session, device_index, generation, lingering),
             daemon=True,
         ).start()
 
@@ -2020,9 +2023,13 @@ class MainWindow(QMainWindow):
             on_first_audio=self.comm.microphone_got_audio.emit,
         )
 
-    def _start_microphone_worker(self, session, device_index, generation):
+    def _start_microphone_worker(self, session, device_index, generation, release_first=None):
         """Open the mic off the UI thread and keep one capture session for the whole Listen take."""
         try:
+            if release_first is not None:
+                # Wait here, never on Qt, until the previous exclusive stream
+                # has closed. Otherwise the next open fails with -9985.
+                release_first.stop(wait=True, timeout=3.0)
             if session.stop_event.is_set() or generation != self._mic_start_generation or not self.is_recording:
                 return
             if device_index is None:
@@ -2042,7 +2049,7 @@ class MainWindow(QMainWindow):
                 return
 
             session.start()
-            opened = session.wait_opened(timeout=8.0)
+            opened = session.wait_opened(timeout=14.0)
             if session.stop_event.is_set() or generation != self._mic_start_generation or not self.is_recording:
                 session.stop(wait=False)
                 return
@@ -2057,7 +2064,8 @@ class MainWindow(QMainWindow):
                     return
                 if generation == self._mic_start_generation and self.is_recording:
                     self.comm.microphone_failed.emit(
-                        "Microphone is busy. Close other apps using the mic, then tap Listen again."
+                        "Could not open the microphone. Tap Listen again. "
+                        "If it keeps failing, restart PressScribe."
                         f"\n\n({detail})"
                     )
                 return
@@ -2081,7 +2089,8 @@ class MainWindow(QMainWindow):
                 return
             if generation == self._mic_start_generation and self.is_recording:
                 self.comm.microphone_failed.emit(
-                    "Microphone is busy. Close other apps using the mic, then tap Listen again."
+                    "Could not open the microphone. Tap Listen again. "
+                    "If it keeps failing, restart PressScribe."
                     f"\n\n({e})"
                 )
 
@@ -2198,7 +2207,7 @@ class MainWindow(QMainWindow):
         generation = self._mic_start_generation
         threading.Thread(
             target=self._start_microphone_worker,
-            args=(session, device_index, generation),
+            args=(session, device_index, generation, old),
             daemon=True,
         ).start()
 
