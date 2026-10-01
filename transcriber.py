@@ -1,11 +1,13 @@
+import array
+import math
 import sys
 import threading
 import time
 import json
 import os
-import io
 import shutil
 import tempfile
+import wave
 import mimetypes
 import pyaudio # Added explicit import for device listing
 from datetime import datetime
@@ -22,7 +24,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject, QEvent, QTimer, QSize, QUrl
 from PySide6.QtGui import (
     QAction, QFont, QActionGroup, QIcon, QColor, QTextCharFormat, QTextCursor,
-    QTextOption, QDesktopServices, QGuiApplication,
+    QTextDocument, QTextOption, QDesktopServices, QGuiApplication,
 )
 
 # --- Core Logic Imports ---
@@ -212,6 +214,32 @@ GEMINI_TRANSCRIBE_PROMPT = (
     "Transcribe this entire audio from beginning to end. "
     "Return only the spoken words as plain text."
 )
+# Collapse only long pauses. Short gaps stay so phrase boundaries remain.
+SILENCE_FRAME_SECONDS = 0.030
+SILENCE_RMS_RATIO = 0.08
+SILENCE_MIN_GAP_SECONDS = 1.2
+SILENCE_REPLACEMENT_SECONDS = 0.250
+SILENCE_MIN_REMOVED_SECONDS = 0.3
+# A frame this many times louder than the audio beside it is a pop, not the speech level.
+SILENCE_SPIKE_RATIO = 4.0
+# A rustle shorter than this, sitting inside a pause, does not split that pause.
+SILENCE_BLIP_SECONDS = 0.060
+# A breath can be longer than a rustle. It joins the pause only when it stays well under speech.
+SILENCE_QUIET_BLIP_SECONDS = 0.300
+SILENCE_QUIET_BLIP_RATIO = 0.25
+# Keep this much of the original audio on each side of a cut so a soft consonant survives.
+SILENCE_EDGE_SECONDS = 0.060
+# Fade the join into the inserted silence so the cut does not end in a tick.
+SILENCE_FADE_SECONDS = 0.010
+# When room noise is louder than 8% of speech, lift the bar only if it stays under this share of speech.
+SILENCE_NOISE_PERCENTILE = 0.10
+SILENCE_NOISE_LIFT = 1.4
+SILENCE_SPEECH_PERCENTILE = 0.75
+SILENCE_THRESHOLD_CAP_RATIO = 0.35
+# If the loudest frames are much louder than the typical frame, they are the speech, not the room.
+SILENCE_SPEECH_CONTRAST = 3.0
+TRIM_SILENCE_UNSUPPORTED = "Trim silence needs the WAV from Listen or a 16-bit WAV."
+AUDIO_SAVE_EXTENSIONS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".wma", ".webm"}
 
 _portaudio_lock = threading.Lock()
 _portaudio_host = None
@@ -434,6 +462,275 @@ def last_audio_dir():
     path = os.path.join(app_config_dir(), "last_audio")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _pcm16_samples_from_wav_bytes(raw):
+    samples = array.array("h")
+    if len(raw) % 2 != 0:
+        raise RuntimeError(TRIM_SILENCE_UNSUPPORTED)
+    samples.frombytes(raw)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return samples
+
+
+def _pcm16_samples_to_wav_bytes(samples):
+    if sys.byteorder == "little":
+        return samples.tobytes()
+    swapped = array.array("h", samples)
+    swapped.byteswap()
+    return swapped.tobytes()
+
+
+def _downmix_to_mono(samples, channels):
+    if channels == 1:
+        return samples
+    pair_count = len(samples) // 2
+    mono = array.array("h", [0]) * pair_count
+    for index in range(pair_count):
+        left = samples[index * 2]
+        right = samples[index * 2 + 1]
+        mono[index] = int((left + right) / 2)
+    return mono
+
+
+def _rms_without_spikes(rms_values):
+    """Drop frames that are much louder than the audio on either side."""
+    if len(rms_values) < 2:
+        return list(rms_values)
+    kept = []
+    last_index = len(rms_values) - 1
+    for index, rms in enumerate(rms_values):
+        neighbors = []
+        if index > 0:
+            neighbors.append(rms_values[index - 1])
+        if index < last_index:
+            neighbors.append(rms_values[index + 1])
+        neighbor = max(neighbors) if neighbors else 0.0
+        if rms > neighbor * SILENCE_SPIKE_RATIO and rms > neighbor:
+            continue
+        kept.append(rms)
+    return kept or list(rms_values)
+
+
+def _percentile(ordered, fraction):
+    index = min(len(ordered) - 1, max(0, int(len(ordered) * fraction)))
+    return ordered[index]
+
+
+def _silence_threshold(rms_values):
+    """Return (silence level, speech level).
+
+    Speech level is the typical loud part of the file, not a single peak.
+    The usual silence bar is 8% of that level. If the quiet part is louder
+    than that and still well below speech, the bar moves up to sit just above
+    the room noise. When speech and noise are too close, the strict bar stays
+    so quiet speech is not cut.
+    """
+    if not rms_values:
+        return 0.0, 0.0
+    kept = _rms_without_spikes(rms_values)
+    ordered_kept = sorted(kept)
+    peak = ordered_kept[-1]
+    typical = _percentile(ordered_kept, SILENCE_SPEECH_PERCENTILE)
+    if peak > typical * SILENCE_SPEECH_CONTRAST:
+        speech = peak
+    else:
+        speech = typical
+    if speech <= 0:
+        return 0.0, 0.0
+    noise = _percentile(sorted(rms_values), SILENCE_NOISE_PERCENTILE)
+    relative = SILENCE_RMS_RATIO * speech
+    if noise < relative:
+        return relative, speech
+    lifted = noise * SILENCE_NOISE_LIFT
+    cap = speech * SILENCE_THRESHOLD_CAP_RATIO
+    if lifted >= cap:
+        return relative, speech
+    return lifted, speech
+
+
+def _absorb_silence_blips(silent, rms_values, speech_level):
+    """Treat noise surrounded by silence as part of that pause.
+
+    Any rustle up to about 60ms joins the pause. A longer sound joins it only
+    when it stays well under the speech level, which is a breath rather than a word.
+    """
+    max_blip_frames = max(1, int(round(SILENCE_BLIP_SECONDS / SILENCE_FRAME_SECONDS)))
+    max_quiet_frames = max(
+        max_blip_frames,
+        int(round(SILENCE_QUIET_BLIP_SECONDS / SILENCE_FRAME_SECONDS)),
+    )
+    quiet_ceiling = speech_level * SILENCE_QUIET_BLIP_RATIO
+    absorbed = list(silent)
+    index = 0
+    count = len(silent)
+    while index < count:
+        if silent[index]:
+            index += 1
+            continue
+        start = index
+        while index < count and not silent[index]:
+            index += 1
+        blip_frames = index - start
+        surrounded = (
+            start > 0
+            and index < count
+            and silent[start - 1]
+            and silent[index]
+        )
+        if not surrounded:
+            continue
+        quiet_enough = (
+            blip_frames <= max_quiet_frames
+            and quiet_ceiling > 0
+            and max(rms_values[start:index]) < quiet_ceiling
+        )
+        if blip_frames <= max_blip_frames or quiet_enough:
+            for cursor in range(start, index):
+                absorbed[cursor] = True
+    return absorbed
+
+
+def _trim_output_dir():
+    """Same folder the app already purges, so a copy left behind does not live forever."""
+    path = os.path.join(tempfile.gettempdir(), "pressscribe_imports")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _fade_toward_silence(head, tail, fade_len):
+    """Soften the inner edge of each kept side so the jump into silence is small."""
+    head = array.array("h", head)
+    tail = array.array("h", tail)
+    fade = min(fade_len, len(head), len(tail))
+    if fade <= 0:
+        return head, tail
+    for index in range(fade):
+        head_gain = (fade - index) / (fade + 1)
+        tail_gain = (index + 1) / (fade + 1)
+        head[-fade + index] = int(head[-fade + index] * head_gain)
+        tail[index] = int(tail[index] * tail_gain)
+    return head, tail
+
+
+def trim_long_silences(source_path):
+    """Write a temp 16-bit mono WAV with pauses of at least 1.2s collapsed.
+
+    The middle of each long pause becomes 250ms of silence. About 60ms of the
+    original audio stays on each side of that cut. Returns the temp path when
+    a copy was written. Returns None when no pause was long enough to remove
+    at least 0.3s, including a valid WAV that is too short to cut. Raises
+    RuntimeError when the file is not 16-bit PCM WAV with one or two channels.
+    """
+    try:
+        with wave.open(source_path, "rb") as reader:
+            channels = reader.getnchannels()
+            sample_width = reader.getsampwidth()
+            sample_rate = reader.getframerate()
+            frame_count = reader.getnframes()
+            raw = reader.readframes(frame_count)
+    except (wave.Error, EOFError) as exc:
+        raise RuntimeError(TRIM_SILENCE_UNSUPPORTED) from exc
+
+    if sample_width != 2 or channels not in (1, 2) or sample_rate <= 0:
+        raise RuntimeError(TRIM_SILENCE_UNSUPPORTED)
+    if not raw:
+        return None
+
+    samples = _downmix_to_mono(_pcm16_samples_from_wav_bytes(raw), channels)
+    if len(samples) == 0:
+        return None
+
+    frame_len = max(1, int(sample_rate * SILENCE_FRAME_SECONDS))
+    full_frames = len(samples) // frame_len
+    if full_frames == 0:
+        return None
+
+    rms_values = []
+    for index in range(full_frames):
+        start = index * frame_len
+        end = start + frame_len
+        total = 0
+        total_squares = 0
+        count = end - start
+        for offset in range(start, end):
+            sample = samples[offset]
+            total += sample
+            total_squares += sample * sample
+        mean = total / count
+        # Drop the frame's average so a steady mic bias is not mistaken for sound.
+        variance = total_squares / count - mean * mean
+        if variance < 0:
+            variance = 0.0
+        rms_values.append(math.sqrt(variance))
+
+    threshold, speech_level = _silence_threshold(rms_values)
+    silent = _absorb_silence_blips(
+        [rms < threshold for rms in rms_values],
+        rms_values,
+        speech_level,
+    )
+
+    min_gap_samples = int(sample_rate * SILENCE_MIN_GAP_SECONDS)
+    replacement_samples = int(sample_rate * SILENCE_REPLACEMENT_SECONDS)
+    edge_samples = int(sample_rate * SILENCE_EDGE_SECONDS)
+    fade_samples = int(sample_rate * SILENCE_FADE_SECONDS)
+    output = array.array("h")
+    removed_samples = 0
+    index = 0
+    while index < full_frames:
+        if not silent[index]:
+            start = index
+            while index < full_frames and not silent[index]:
+                index += 1
+            chunk = samples[start * frame_len:index * frame_len]
+            if index == full_frames:
+                chunk.extend(samples[index * frame_len:])
+            output.extend(chunk)
+            continue
+        start = index
+        while index < full_frames and silent[index]:
+            index += 1
+        gap = samples[start * frame_len:index * frame_len]
+        if index == full_frames:
+            gap.extend(samples[index * frame_len:])
+        if len(gap) >= min_gap_samples and edge_samples * 2 < len(gap):
+            head, tail = _fade_toward_silence(
+                gap[:edge_samples],
+                gap[-edge_samples:],
+                fade_samples,
+            )
+            output.extend(head)
+            if replacement_samples:
+                output.extend(array.array("h", [0]) * replacement_samples)
+            output.extend(tail)
+            removed_samples += len(gap) - (edge_samples * 2) - replacement_samples
+        else:
+            output.extend(gap)
+
+    if sample_rate <= 0 or removed_samples / sample_rate < SILENCE_MIN_REMOVED_SECONDS:
+        return None
+
+    descriptor, dest_path = tempfile.mkstemp(
+        prefix="pressscribe_trim_",
+        suffix=".wav",
+        dir=_trim_output_dir(),
+    )
+    os.close(descriptor)
+    try:
+        with wave.open(dest_path, "wb") as writer:
+            writer.setnchannels(1)
+            writer.setsampwidth(2)
+            writer.setframerate(sample_rate)
+            writer.writeframes(_pcm16_samples_to_wav_bytes(output))
+    except Exception:
+        try:
+            os.remove(dest_path)
+        except OSError:
+            pass
+        raise
+    return dest_path
 
 
 def app_config_dir():
@@ -729,6 +1026,28 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
 }
 """
 
+class PlainPasteTextEdit(QTextEdit):
+    """QTextEdit that always pastes and drops unformatted plain text."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setAcceptRichText(False)
+
+    def canInsertFromMimeData(self, source):
+        return bool(source) and (source.hasText() or source.hasHtml())
+
+    def insertFromMimeData(self, source):
+        if source is None:
+            return
+        text = source.text() if source.hasText() else ""
+        if not text and source.hasHtml():
+            document = QTextDocument()
+            document.setHtml(source.html())
+            text = document.toPlainText()
+        if text:
+            self.insertPlainText(text)
+
+
 class EditPromptDialog(QDialog):
     def __init__(self, parent=None, current_prompt=""):
         super().__init__(parent)
@@ -740,7 +1059,7 @@ class EditPromptDialog(QDialog):
         self.prompt_label = QLabel("System Prompt:")
         layout.addWidget(self.prompt_label)
 
-        self.prompt_text_edit = QTextEdit()
+        self.prompt_text_edit = PlainPasteTextEdit()
         self.prompt_text_edit.setWordWrapMode(QTextOption.WordWrap) # Enable word wrap
         self.prompt_text_edit.setPlainText(current_prompt)
         layout.addWidget(self.prompt_text_edit)
@@ -979,9 +1298,10 @@ class WelcomeSetupDialog(QDialog):
         try:
             genai = get_genai()
             genai.configure(api_key=key)
-            models = list(genai.list_models())
-            if not models:
-                raise RuntimeError("No models were returned for this key.")
+            model = genai.GenerativeModel(DEFAULT_SETTINGS["gemini_model"])
+            response = model.generate_content("Reply with OK.")
+            if not (getattr(response, "text", "") or "").strip():
+                raise RuntimeError("Gemini accepted the key but returned an empty reply.")
             QMessageBox.information(self, "API key OK", "This Gemini API key works.")
         except Exception as exc:
             QMessageBox.warning(
@@ -1168,12 +1488,27 @@ class MainWindow(QMainWindow):
         self.import_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.transcribe_import_button = QPushButton("▶ Transcribe")
         self.transcribe_import_button.clicked.connect(self.transcribe_imported_audio)
+        self.trim_silence_button = QPushButton("Trim silence")
+        self.trim_silence_button.setToolTip("Cut long pauses and transcribe the copy.")
+        self.trim_silence_button.clicked.connect(
+            lambda: self.transcribe_imported_audio(trim_silence=True)
+        )
+        self.save_audio_button = QPushButton("Save")
+        self.save_audio_button.setToolTip("Save a copy of this audio file.")
+        self.save_audio_button.clicked.connect(self.save_imported_audio)
         self.clear_import_button = QPushButton("Clear")
         self.clear_import_button.clicked.connect(self.clear_imported_audio)
-        for import_button in (self.transcribe_import_button, self.clear_import_button):
+        for import_button in (
+            self.transcribe_import_button,
+            self.trim_silence_button,
+            self.save_audio_button,
+            self.clear_import_button,
+        ):
             self._configure_editor_toolbar_button(import_button)
         import_layout.addWidget(self.import_label, stretch=1)
         import_layout.addWidget(self.transcribe_import_button)
+        import_layout.addWidget(self.trim_silence_button)
+        import_layout.addWidget(self.save_audio_button)
         import_layout.addWidget(self.clear_import_button)
         editor_layout.addWidget(self.import_strip, 0)
 
@@ -1184,7 +1519,7 @@ class MainWindow(QMainWindow):
         raw_panel = EditorSplitPane()
         raw_layout = QVBoxLayout(raw_panel)
         raw_layout.addWidget(QLabel("Raw Transcription"))
-        self.raw_text_area = QTextEdit()
+        self.raw_text_area = PlainPasteTextEdit()
         self.raw_text_area.setObjectName("raw_text_area") # For ghost cursor
         raw_layout.addWidget(self.raw_text_area)
 
@@ -1218,7 +1553,7 @@ class MainWindow(QMainWindow):
         polished_panel = EditorSplitPane()
         polished_layout = QVBoxLayout(polished_panel)
         polished_layout.addWidget(QLabel("Polished Text"))
-        self.polished_text_area = QTextEdit()
+        self.polished_text_area = PlainPasteTextEdit()
         self.polished_text_area.setObjectName("polished_text_area") # For ghost cursor
         polished_layout.addWidget(self.polished_text_area)
 
@@ -1305,7 +1640,7 @@ class MainWindow(QMainWindow):
         detail_header.addStretch(1)
         detail_header.addWidget(self.note_copy_button)
         note_detail_layout.addLayout(detail_header)
-        self.note_detail_edit = QTextEdit()
+        self.note_detail_edit = PlainPasteTextEdit()
         self.note_detail_edit.textChanged.connect(self._on_note_detail_changed)
         note_detail_layout.addWidget(self.note_detail_edit)
         self.notes_stack.addWidget(note_detail_page)
@@ -1892,6 +2227,8 @@ class MainWindow(QMainWindow):
         self.is_import_transcribing = True
         self._set_import_controls_enabled(False)
         self.transcribe_import_button.setText("…")
+        if hasattr(self, "trim_silence_button"):
+            self.trim_silence_button.setText("…")
 
     def finish_import_processing(self):
         self.is_import_transcribing = False
@@ -1907,6 +2244,8 @@ class MainWindow(QMainWindow):
         self._set_import_controls_enabled(True)
         if hasattr(self, "transcribe_import_button"):
             self.transcribe_import_button.setText("▶ Transcribe")
+        if hasattr(self, "trim_silence_button"):
+            self.trim_silence_button.setText("Trim silence")
         if self._is_button_spinning("record"):
             self.finish_record_processing()
         self._refresh_all_ghost_cursors()
@@ -1927,6 +2266,8 @@ class MainWindow(QMainWindow):
     def _set_import_controls_enabled(self, enabled):
         if hasattr(self, "transcribe_import_button"):
             self.transcribe_import_button.setEnabled(enabled)
+        if hasattr(self, "trim_silence_button"):
+            self.trim_silence_button.setEnabled(enabled)
         if hasattr(self, "clear_import_button"):
             self.clear_import_button.setEnabled(enabled)
 
@@ -2455,26 +2796,6 @@ class MainWindow(QMainWindow):
             raise RuntimeError("Qwen 3 ASR server returned an empty transcription.")
         return text
 
-    def _gemini_file_state_name(self, audio_file):
-        state = getattr(audio_file, "state", None)
-        if state is None:
-            return ""
-        if isinstance(state, int):
-            return {0: "UNSPECIFIED", 1: "PROCESSING", 2: "ACTIVE", 10: "FAILED"}.get(
-                state, str(state)
-            )
-        name = getattr(state, "name", None) or str(state)
-        text = str(name).upper().rsplit(".", 1)[-1].replace("STATE_", "")
-        if text in ("FAILED", "PROCESSING", "ACTIVE", "UNSPECIFIED"):
-            return text
-        if "FAILED" in text:
-            return "FAILED"
-        if "PROCESSING" in text:
-            return "PROCESSING"
-        if text.endswith("ACTIVE"):
-            return "ACTIVE"
-        return text
-
     def _gemini_response_text(self, response):
         finish = ""
         try:
@@ -2495,69 +2816,33 @@ class MainWindow(QMainWindow):
             raise RuntimeError("Gemini returned an empty transcription.")
         return text
 
-    def _wait_for_gemini_file_active(self, genai, audio_file, timeout_s=180.0):
-        current = audio_file
-        deadline = time.time() + timeout_s
-        notified = False
-        while True:
-            state = self._gemini_file_state_name(current)
-            print(f"DEBUG: Gemini uploaded file state={state or 'unknown'}")
-            if state == "FAILED":
-                raise RuntimeError("Gemini failed to process the uploaded audio.")
-            if state == "ACTIVE":
-                return current
-            if state == "PROCESSING" and not notified:
-                self.comm.status.emit("Waiting for Gemini to finish processing the audio...")
-                notified = True
-            if time.time() >= deadline:
-                raise RuntimeError(
-                    "Gemini is still processing the uploaded audio. Tap Transcribe to retry."
-                )
-            time.sleep(0.5)
-            name = getattr(current, "name", None)
-            if not name:
-                continue
-            getter = getattr(genai, "get_file", None)
-            if getter is None:
-                continue
-            try:
-                current = getter(name)
-            except Exception as refresh_error:
-                print(f"DEBUG: Gemini get_file failed: {refresh_error}")
-                if time.time() >= deadline:
-                    raise RuntimeError(
-                        "Gemini is still processing the uploaded audio. Tap Transcribe to retry."
-                    ) from refresh_error
+    def _transcribe_audio_bytes_with_gemini(self, audio_bytes, mime_type):
+        """Send audio inline to generate_content.
 
-    def _transcribe_with_gemini(self, audio_data_to_recognize):
+        Current AI Studio keys (AQ.… as well as AIza…) work on models.generateContent.
+        The Files API used by upload_file still goes through API discovery with
+        ?key= in the URL, which rejects the newer AQ. keys as invalid.
+        """
         api_key = self.settings.get("api_key", "").strip()
         if not api_key:
             raise RuntimeError("Gemini API key is not configured.")
-
+        if not audio_bytes:
+            raise RuntimeError("No audio data to transcribe.")
         genai = get_genai()
         genai.configure(api_key=api_key)
-        gemini_model_name = self.settings["gemini_model"]
-        model = genai.GenerativeModel(gemini_model_name)
+        model = genai.GenerativeModel(self.settings["gemini_model"])
+        response = model.generate_content(
+            [
+                GEMINI_TRANSCRIBE_PROMPT,
+                {"mime_type": mime_type, "data": audio_bytes},
+            ],
+            generation_config={"max_output_tokens": 8192, "temperature": 0},
+        )
+        return self._gemini_response_text(response)
 
+    def _transcribe_with_gemini(self, audio_data_to_recognize):
         wav_data = audio_data_to_recognize.get_wav_data(convert_rate=16000, convert_width=2)
-        audio_file = None
-        try:
-            audio_buffer = io.BytesIO(wav_data)
-            audio_buffer.name = "recording.wav"
-            audio_file = genai.upload_file(audio_buffer, mime_type="audio/wav", display_name="recording.wav")
-            audio_file = self._wait_for_gemini_file_active(genai, audio_file)
-            response = model.generate_content(
-                [GEMINI_TRANSCRIBE_PROMPT, audio_file],
-                generation_config={"max_output_tokens": 8192, "temperature": 0},
-            )
-            return self._gemini_response_text(response)
-        finally:
-            if audio_file is not None:
-                try:
-                    resource_name = getattr(audio_file, "name", audio_file)
-                    genai.delete_file(resource_name)
-                except Exception as delete_error:
-                    print(f"DEBUG: Failed to delete Gemini uploaded audio file: {delete_error}")
+        return self._transcribe_audio_bytes_with_gemini(wav_data, "audio/wav")
 
     def _transcribe_with_service(self, audio_data_to_recognize, service_name):
         if service_name == "Gemini":
@@ -3461,6 +3746,73 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.show_error_message(f"Failed to import audio: {e}")
 
+    def _suggested_audio_save_name(self, source_path):
+        source_ext = os.path.splitext(source_path)[1].lower() or ".wav"
+        display = (getattr(self, "imported_audio_name", None) or "").strip()
+        display_ext = os.path.splitext(os.path.basename(display))[1].lower()
+        if display_ext in AUDIO_SAVE_EXTENSIONS:
+            base = os.path.splitext(os.path.basename(display))[0]
+            ext = display_ext
+        else:
+            base = datetime.now().strftime("PressScribe-%Y%m%d-%H%M%S")
+            ext = source_ext if source_ext in AUDIO_SAVE_EXTENSIONS else ".wav"
+        cleaned = "".join(ch if ch not in '\\/:*?"<>|' else "-" for ch in base).strip(" .")
+        if not cleaned:
+            cleaned = "PressScribe-audio"
+        return cleaned + ext
+
+    def _copy_audio_atomically(self, source_path, dest_path):
+        """Copy beside the destination, then replace it only after the copy is complete."""
+        directory = os.path.dirname(dest_path) or "."
+        os.makedirs(directory, exist_ok=True)
+        descriptor, temp_path = tempfile.mkstemp(
+            prefix=".pressscribe-save-",
+            suffix=".part",
+            dir=directory,
+        )
+        os.close(descriptor)
+        try:
+            shutil.copy2(source_path, temp_path)
+            os.replace(temp_path, dest_path)
+        except Exception:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            raise
+
+    def save_imported_audio(self):
+        path = self.imported_audio_path
+        if not path or not os.path.exists(path):
+            self.show_status_message("No audio file is loaded.")
+            return
+        ext = os.path.splitext(path)[1].lower() or ".wav"
+        if ext not in AUDIO_SAVE_EXTENSIONS:
+            ext = ".wav"
+        suggested = self._suggested_audio_save_name(path)
+        start_dir = getattr(self, "_audio_save_dir", "") or os.path.expanduser("~")
+        initial = os.path.join(start_dir, suggested)
+        if ext == ".wav":
+            file_filter = "WAV audio (*.wav);;All files (*)"
+        else:
+            file_filter = f"Audio (*{ext});;All files (*)"
+        filename, _selected = QFileDialog.getSaveFileName(self, "Save Audio", initial, file_filter)
+        if not filename:
+            return
+        chosen_ext = os.path.splitext(filename)[1].lower()
+        if chosen_ext not in AUDIO_SAVE_EXTENSIONS:
+            filename += ext
+        if os.path.abspath(filename) == os.path.abspath(path):
+            self.show_status_message("Choose a different place to save a copy.")
+            return
+        try:
+            self._copy_audio_atomically(path, filename)
+        except OSError as save_error:
+            self.show_error_message(f"Could not save the audio file: {save_error}")
+            return
+        self._audio_save_dir = os.path.dirname(os.path.abspath(filename))
+        self.show_status_message(f"Audio saved to {filename}.")
+
     def clear_imported_audio(self, delete_only=False):
         if self.is_import_transcribing and not delete_only:
             self.show_status_message("Wait for the current transcription to finish before clearing.")
@@ -3481,7 +3833,7 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
 
-    def transcribe_imported_audio(self, from_listen=False):
+    def transcribe_imported_audio(self, from_listen=False, trim_silence=False):
         if not self.imported_audio_path or not os.path.exists(self.imported_audio_path):
             self.show_status_message("No audio file is loaded.")
             return
@@ -3504,23 +3856,39 @@ class MainWindow(QMainWindow):
             self.start_import_processing()
         threading.Thread(
             target=self.process_imported_audio_file,
-            args=(path, primary, from_listen),
+            args=(path, primary, from_listen, trim_silence),
             daemon=True,
         ).start()
 
-    def process_imported_audio_file(self, filepath, primary_service, from_listen=False):
+    def process_imported_audio_file(self, filepath, primary_service, from_listen=False, trim_silence=False):
         attempt_order = self.get_transcription_fallback_order(primary_service)
         failures = []
+        trimmed_path = None
+        audio_path = filepath
         try:
+            if trim_silence:
+                self.comm.status.emit("Trimming long silences...")
+                try:
+                    trimmed_path = trim_long_silences(filepath)
+                except Exception as trim_error:
+                    message = safe_error_text(trim_error)
+                    self.comm.status.emit(message)
+                    self.comm.error.emit(message)
+                    return
+                if trimmed_path:
+                    audio_path = trimmed_path
+                    self.comm.status.emit("Transcribing trimmed audio...")
+                else:
+                    self.comm.status.emit("No long silence found. Transcribing the original.")
             for service_name in attempt_order:
                 try:
                     if service_name == "Google":
-                        audio_data = self._try_load_audio_data_from_file(filepath)
+                        audio_data = self._try_load_audio_data_from_file(audio_path)
                         if audio_data is None:
                             raise RuntimeError("Google Speech requires WAV/FLAC/AIFF audio.")
                         text = self._transcribe_with_google(audio_data)
                     else:
-                        text = self._transcribe_file_with_service(filepath, service_name)
+                        text = self._transcribe_file_with_service(audio_path, service_name)
                     if from_listen:
                         self.comm.text_ready.emit(text + " ")
                     else:
@@ -3533,6 +3901,15 @@ class MainWindow(QMainWindow):
                     safe_debug(f"DEBUG: Import transcription via {service_name} failed: {safe_error_text(e)}")
             self.comm.error.emit("All transcription attempts failed:\n" + "\n".join(failures))
         finally:
+            if (
+                trimmed_path
+                and os.path.exists(trimmed_path)
+                and os.path.abspath(trimmed_path) != os.path.abspath(filepath)
+            ):
+                try:
+                    os.remove(trimmed_path)
+                except OSError:
+                    pass
             self.comm.import_finished.emit()
 
     def _try_load_audio_data_from_file(self, filepath):
@@ -3600,29 +3977,10 @@ class MainWindow(QMainWindow):
         return text
 
     def _transcribe_file_with_gemini(self, filepath):
-        api_key = self.settings.get("api_key", "").strip()
-        if not api_key:
-            raise RuntimeError("Gemini API key is not configured.")
-        genai = get_genai()
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(self.settings["gemini_model"])
         mime = self._guess_audio_mime(filepath)
-        audio_file = None
-        try:
-            audio_file = genai.upload_file(filepath, mime_type=mime)
-            audio_file = self._wait_for_gemini_file_active(genai, audio_file)
-            response = model.generate_content(
-                [GEMINI_TRANSCRIBE_PROMPT, audio_file],
-                generation_config={"max_output_tokens": 8192, "temperature": 0},
-            )
-            return self._gemini_response_text(response)
-        finally:
-            if audio_file is not None:
-                try:
-                    resource_name = getattr(audio_file, "name", audio_file)
-                    genai.delete_file(resource_name)
-                except Exception as delete_error:
-                    print(f"DEBUG: Failed to delete Gemini uploaded audio file: {delete_error}")
+        with open(filepath, "rb") as handle:
+            audio_bytes = handle.read()
+        return self._transcribe_audio_bytes_with_gemini(audio_bytes, mime)
 
     # --- Ghost Cursor Implementation ---
     def eventFilter(self, watched, event):
